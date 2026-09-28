@@ -1,0 +1,17 @@
+services:
+  desktop-check:
+    build: .
+    command: python -m unittest discover -s tests -v
+    environment:
+      QT_QPA_PLATFORM: offscreen
+      DATABASE_URL: sqlite:////app/data/video_editor.sqlite3
+      TAISLY_API_KEY: ""
+      UPLOAD_FOLDER: /app/uploads
+      OUTPUT_FOLDER: /app/outputs
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - desktop_data:/app/data
+
+volumes:
+  desktop_data:
