@@ -196,6 +196,8 @@ class HistoryWidget(QWidget):
         )
         repeat_button.setEnabled(
             latest is not None
+            and latest.status in {"error", "queued"}
+            and latest.account_id is not None
             and video.status == "ready"
             and bool(video.output_path)
             and Path(video.output_path).is_file()
@@ -244,6 +246,10 @@ class HistoryWidget(QWidget):
         with SessionLocal() as session:
             post = session.get(Post, post_id)
             if post is None:
+                return
+            if post.status not in {"error", "queued"} or post.account_id is None:
+                QMessageBox.warning(self, "Повторная публикация",
+                                    "Опубликованный или ожидающий ролик нельзя отправлять повторно: это создаст дубликат.")
                 return
             post.status = "queued"
             post.error_message = None

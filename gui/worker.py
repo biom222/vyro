@@ -6,7 +6,6 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from app.config import settings
 from app.models import SessionLocal, Video
-from app.publisher import get_platforms
 from app.tasks import (
     analyze_video_for_clips,
     probe_video,
@@ -15,6 +14,7 @@ from app.tasks import (
     search_short_clip_trends,
     render_video,
     sync_account_analytics,
+    refresh_publication,
 )
 
 
@@ -148,13 +148,60 @@ class PublishWorker(QThread):
             self.error.emit(str(exc))
 
 
-class PlatformWorker(QThread):
-    succeeded = pyqtSignal(object)
+class AccountConnectWorker(QThread):
+    succeeded = pyqtSignal(str, object)
     error = pyqtSignal(str)
+
+    def __init__(self, provider: str, parent=None):
+        super().__init__(parent)
+        self.provider = provider
 
     def run(self) -> None:
         try:
-            self.succeeded.emit(get_platforms())
+            if self.provider == "youtube":
+                from app.services.youtube_oauth_server import run_local_youtube_oauth
+                result = run_local_youtube_oauth()
+                ids = [result.account_id]
+            elif self.provider == "tiktok":
+                from app.services.social_oauth import connect_tiktok
+                ids = [connect_tiktok()]
+            elif self.provider == "instagram":
+                from app.services.social_oauth import connect_instagram
+                ids = connect_instagram()
+            else:
+                raise ValueError("Unsupported account provider")
+            self.succeeded.emit(self.provider, ids)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class TikTokCreatorInfoWorker(QThread):
+    succeeded = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, account_id: int, parent=None):
+        super().__init__(parent)
+        self.account_id = account_id
+
+    def run(self) -> None:
+        try:
+            from app.services.direct_publishing import get_tiktok_creator_info
+            self.succeeded.emit(get_tiktok_creator_info(self.account_id))
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class PublicationStatusWorker(QThread):
+    succeeded = pyqtSignal(int, str)
+    error = pyqtSignal(str)
+
+    def __init__(self, post_id: int, parent=None):
+        super().__init__(parent)
+        self.post_id = post_id
+
+    def run(self) -> None:
+        try:
+            self.succeeded.emit(self.post_id, refresh_publication(self.post_id))
         except Exception as exc:
             self.error.emit(str(exc))
 

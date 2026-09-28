@@ -1,28 +1,19 @@
 from __future__ import annotations
 
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
-from PyQt6.QtCore import QDateTime, pyqtSignal
+from PyQt6.QtCore import QDateTime, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
-    QComboBox,
-    QDateTimeEdit,
-    QFormLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMessageBox,
-    QPushButton,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
+    QCheckBox, QComboBox, QDateTimeEdit, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QPushButton, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from app.models import Post, SessionLocal, Video
-from app.publisher import is_mock_mode
+from app.config import settings
+from app.models import ConnectedAccount, Post, SessionLocal, Video
+from app.services.accounts import get_active_account_id
 from app.services.scheduler import schedule_post
-from gui.worker import PlatformWorker, PublishWorker
+from gui.worker import PublicationStatusWorker, PublishWorker, TikTokCreatorInfoWorker
 
 
 class PublishWidget(QWidget):
@@ -34,176 +25,211 @@ class PublishWidget(QWidget):
         self.video_id: int | None = None
         self.output_path: str | None = None
         self.output_duration: float | None = None
-        self.platform_worker: PlatformWorker | None = None
         self.publish_worker: PublishWorker | None = None
-        self.platforms_loaded = False
-
+        self.creator_worker: TikTokCreatorInfoWorker | None = None
+        self.status_worker: PublicationStatusWorker | None = None
+        self.pending_post_id: int | None = None
+        self.creator_account_id: int | None = None
+        self.creator_info: dict = {}
+        self.creator_error = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
         heading = QLabel("Публикация")
         heading.setObjectName("pageTitle")
-        subtitle = QLabel(
-            "Выберите подключённый аккаунт Taisly и отправьте готовый ролик."
-        )
-        subtitle.setObjectName("pageSubtitle")
         layout.addWidget(heading)
-        layout.addWidget(subtitle)
-
-        video_group = QGroupBox("Готовое видео")
-        video_layout = QVBoxLayout(video_group)
+        hint = QLabel("Адресат определяется галочкой в верхнем меню «Аккаунты».")
+        hint.setObjectName("pageSubtitle")
+        layout.addWidget(hint)
+        group = QGroupBox("Готовое видео")
+        group_layout = QVBoxLayout(group)
         self.video_label = QLabel("Обработанное видео ещё не выбрано.")
         self.video_label.setWordWrap(True)
-        video_layout.addWidget(self.video_label)
-        layout.addWidget(video_group)
-
+        group_layout.addWidget(self.video_label)
+        layout.addWidget(group)
         form_group = QGroupBox("Параметры публикации")
-        form_layout = QFormLayout(form_group)
-        platform_row = QHBoxLayout()
-        self.platform_combo = QComboBox()
-        self.platform_combo.setPlaceholderText("Загрузка платформ…")
-        self.refresh_button = QPushButton("Обновить")
-        self.refresh_button.setObjectName("secondaryButton")
-        self.refresh_button.clicked.connect(lambda: self.load_platforms(force=True))
-        platform_row.addWidget(self.platform_combo, 1)
-        platform_row.addWidget(self.refresh_button)
-        form_layout.addRow("Платформа:", platform_row)
-
+        form = QFormLayout(form_group)
+        self.form_layout = form
+        self.account_label = QLabel("Аккаунт не выбран")
+        form.addRow("Адресат:", self.account_label)
         self.title_edit = QLineEdit()
         self.title_edit.setMaxLength(255)
         self.title_edit.setPlaceholderText("Заголовок ролика")
-        form_layout.addRow("Заголовок:", self.title_edit)
-
+        form.addRow("Заголовок:", self.title_edit)
         self.description_edit = QTextEdit()
-        self.description_edit.setMaximumHeight(120)
-        self.description_edit.setPlaceholderText("Описание, хэштеги и дополнительный контекст")
-        form_layout.addRow("Описание:", self.description_edit)
+        self.description_edit.setMaximumHeight(100)
+        self.description_edit.setPlaceholderText("Описание и хэштеги")
+        form.addRow("Описание:", self.description_edit)
+        self.privacy_combo = QComboBox()
+        self.privacy_combo.setEnabled(False)
+        form.addRow("Видимость:", self.privacy_combo)
+        self.tiktok_options = QWidget()
+        tiktok_layout = QHBoxLayout(self.tiktok_options)
+        tiktok_layout.setContentsMargins(0, 0, 0, 0)
+        self.disable_comment = QCheckBox("Отключить комментарии")
+        self.disable_duet = QCheckBox("Отключить дуэты")
+        self.disable_stitch = QCheckBox("Отключить Stitch")
+        for checkbox in (self.disable_comment, self.disable_duet, self.disable_stitch):
+            tiktok_layout.addWidget(checkbox)
+        form.addRow("TikTok:", self.tiktok_options)
+        self.commercial_options = QWidget()
+        commercial_layout = QHBoxLayout(self.commercial_options)
+        commercial_layout.setContentsMargins(0, 0, 0, 0)
+        self.brand_content = QCheckBox("Платное партнёрство")
+        self.brand_organic = QCheckBox("Продвижение своего бизнеса")
+        self.ai_generated = QCheckBox("Создано ИИ")
+        for checkbox in (self.brand_content, self.brand_organic, self.ai_generated):
+            commercial_layout.addWidget(checkbox)
+        form.addRow("Метки:", self.commercial_options)
         layout.addWidget(form_group)
-
         self.publish_button = QPushButton("Опубликовать")
         self.publish_button.clicked.connect(self.start_publish)
-        self.publish_button.setEnabled(False)
         self.schedule_time = QDateTimeEdit(QDateTime.currentDateTime().addSecs(3600))
         self.schedule_time.setCalendarPopup(True)
         self.schedule_time.setDisplayFormat("dd.MM.yyyy HH:mm")
         self.schedule_button = QPushButton("Запланировать")
         self.schedule_button.setObjectName("secondaryButton")
         self.schedule_button.clicked.connect(self.schedule_publish)
-        self.schedule_button.setEnabled(False)
-        action_row = QHBoxLayout()
-        action_row.addWidget(self.publish_button)
-        action_row.addWidget(self.schedule_time)
-        action_row.addWidget(self.schedule_button)
-        layout.addLayout(action_row)
-
-        self.status_label = QLabel(
-            "Mock-режим: внешняя публикация отключена."
-            if is_mock_mode()
-            else "Taisly API настроен."
-        )
-        self.status_label.setWordWrap(True)
+        row = QHBoxLayout()
+        row.addWidget(self.publish_button)
+        row.addWidget(self.schedule_time)
+        row.addWidget(self.schedule_button)
+        layout.addLayout(row)
+        self.status_label = QLabel("Подключите аккаунт через меню «Аккаунты».")
         self.status_label.setObjectName("muted")
+        self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
         layout.addStretch()
+        self.status_timer = QTimer(self)
+        self.status_timer.setInterval(10000)
+        self.status_timer.timeout.connect(self._poll_status)
+        self.refresh_account()
 
     def set_video(self, video_id: int, output_path: str, duration: float) -> None:
-        self.video_id = video_id
-        self.output_path = output_path
-        self.output_duration = duration
-        self.video_label.setText(
-            f"{Path(output_path).name}  •  {duration:.1f} сек.\n{output_path}"
-        )
-        self.publish_button.setEnabled(3 <= duration <= 90)
-        self.schedule_button.setEnabled(3 <= duration <= 90)
-        if not 3 <= duration <= 90:
-            self.status_label.setText(
-                "Taisly принимает ролики длительностью от 3 до 90 секунд."
-            )
-        self.load_platforms()
+        self.video_id, self.output_path, self.output_duration = video_id, output_path, duration
+        self.video_label.setText(f"{Path(output_path).name} · {duration:.1f} сек.\n{output_path}")
+        self.refresh_account()
 
-    def load_platforms(self, force: bool = False) -> None:
-        if self.platforms_loaded and not force:
-            return
-        # Keep one worker object until its finished signal is handled. A mock worker can
-        # finish between set_video() and page navigation; replacing that object here
-        # would let the first worker's queued cleanup delete the second running thread.
-        if self.platform_worker is not None:
-            return
-        self.platform_combo.clear()
-        self.platform_combo.setPlaceholderText("Загрузка платформ…")
-        self.refresh_button.setEnabled(False)
-        self.platform_worker = PlatformWorker(self)
-        self.platform_worker.succeeded.connect(self._platforms_succeeded)
-        self.platform_worker.error.connect(self._platforms_failed)
-        self.platform_worker.finished.connect(self._platforms_finished)
-        self.platform_worker.start()
-
-    def _platforms_succeeded(self, platforms: list[dict]) -> None:
-        for platform in platforms:
-            platform_id = str(platform.get("id") or platform.get("_id") or "")
-            if not platform_id:
-                continue
-            network = str(platform.get("platform") or "Platform")
-            account = str(
-                platform.get("displayName") or platform.get("username") or "account"
-            )
-            self.platform_combo.addItem(f"{network} — {account}", platform_id)
-        self.platforms_loaded = self.platform_combo.count() > 0
-        if self.platforms_loaded:
-            self.log_message.emit(
-                f"Получено платформ: {self.platform_combo.count()}."
-            )
-        else:
-            self.status_label.setText("Подключённые платформы не найдены.")
-
-    def _platforms_failed(self, message: str) -> None:
-        self.platforms_loaded = False
-        self.status_label.setText(f"Не удалось получить платформы: {message}")
-        self.log_message.emit(f"Ошибка Taisly: {message}")
-
-    def _platforms_finished(self) -> None:
-        self.refresh_button.setEnabled(True)
-        worker = self.sender()
-        if worker is not None:
-            worker.deleteLater()
-        if worker is self.platform_worker:
-            self.platform_worker = None
-
-    def start_publish(self) -> None:
-        if self.video_id is None or self.is_busy():
-            return
-        platform_id = self.platform_combo.currentData()
-        if not platform_id:
-            QMessageBox.warning(self, "Платформа не выбрана", "Выберите аккаунт Taisly.")
-            return
-        if self.output_duration is None or not 3 <= self.output_duration <= 90:
-            QMessageBox.warning(
-                self,
-                "Неверная длительность",
-                "Taisly принимает видео длительностью от 3 до 90 секунд.",
-            )
-            return
-
+    def refresh_account(self) -> None:
+        account_id = get_active_account_id()
         with SessionLocal() as session:
-            video = session.get(Video, self.video_id)
-            if video is None or video.status != "ready":
-                QMessageBox.warning(self, "Видео не готово", "Сначала завершите обработку.")
-                return
-            post = Post(
-                video_id=video.id,
-                platform=str(platform_id),
-                title=self.title_edit.text().strip(),
-                description=self.description_edit.toPlainText().strip(),
-                status="queued",
-            )
+            account = session.get(ConnectedAccount, account_id) if account_id else None
+            provider = account.provider if account else None
+            ready = bool(account and account.status == "connected" and account.credential_ref)
+            label = (f"{provider.title()} · {account.display_name or account.username}"
+                     if account else "Аккаунт не выбран")
+        self.account_label.setText(label)
+        self.form_layout.setRowVisible(self.tiktok_options, provider == "tiktok")
+        self.form_layout.setRowVisible(self.commercial_options, provider == "tiktok")
+        self.privacy_combo.clear()
+        if provider == "youtube":
+            for text, value in (("Приватное", "private"), ("По ссылке", "unlisted"), ("Публичное", "public")):
+                self.privacy_combo.addItem(text, value)
+            self.privacy_combo.setEnabled(ready)
+        elif provider == "tiktok" and ready:
+            if self.creator_account_id == account_id and self.creator_info:
+                for value in self.creator_info.get("privacy_level_options") or []:
+                    self.privacy_combo.addItem(value, value)
+                self.privacy_combo.setEnabled(self.privacy_combo.count() > 0)
+                for checkbox, key in ((self.disable_comment, "comment_disabled"),
+                                      (self.disable_duet, "duet_disabled"),
+                                      (self.disable_stitch, "stitch_disabled")):
+                    disabled = bool(self.creator_info.get(key))
+                    if disabled:
+                        checkbox.setChecked(True)
+                    checkbox.setEnabled(not disabled)
+            elif self.creator_worker is None and not self.creator_error:
+                self.privacy_combo.addItem("Получение настроек TikTok…")
+                self.creator_worker = TikTokCreatorInfoWorker(account_id, self)
+                self.creator_worker.succeeded.connect(lambda info, aid=account_id: self._creator_loaded(aid, info))
+                self.creator_worker.error.connect(self._creator_failed)
+                self.creator_worker.finished.connect(self._creator_finished)
+                self.creator_worker.start()
+        elif provider == "instagram":
+            self.privacy_combo.addItem("Публичный Reel")
+        valid = bool(self.video_id and self.output_duration is not None
+                     and 3 <= self.output_duration <= settings.max_video_duration
+                     and self.output_path and Path(self.output_path).is_file())
+        enabled = valid and ready and not self.is_busy() and (provider != "tiktok" or self.privacy_combo.isEnabled())
+        self.publish_button.setEnabled(enabled)
+        self.schedule_button.setEnabled(enabled)
+        if not ready:
+            self.status_label.setText("Подключите и выберите аккаунт в верхнем меню «Аккаунты».")
+        elif self.output_duration is not None and not valid:
+            self.status_label.setText(f"Для публикации нужно готовое MP4 длительностью от 3 до {settings.max_video_duration:.0f} сек.")
+
+    def _creator_loaded(self, account_id: int, info: dict) -> None:
+        self.creator_account_id, self.creator_info = account_id, info
+        self.creator_error = False
+        self.refresh_account()
+
+    def _creator_failed(self, message: str) -> None:
+        self.creator_error = True
+        self.status_label.setText(f"Не удалось получить настройки TikTok: {message}")
+        self.log_message.emit(self.status_label.text())
+
+    def _creator_finished(self) -> None:
+        worker, self.creator_worker = self.creator_worker, None
+        if worker:
+            worker.deleteLater()
+        self.refresh_account()
+
+    def _new_post(self) -> int | None:
+        account_id = get_active_account_id()
+        with SessionLocal() as session:
+            account = session.get(ConnectedAccount, account_id) if account_id else None
+            video = session.get(Video, self.video_id) if self.video_id else None
+            if not account or account.status != "connected" or not account.credential_ref:
+                QMessageBox.warning(self, "Аккаунт", "Выберите подключённый аккаунт в меню «Аккаунты».")
+                return None
+            if not video or video.status != "ready" or not video.output_path or not Path(video.output_path).is_file():
+                QMessageBox.warning(self, "Видео", "Сначала завершите обработку MP4.")
+                return None
+            duration = video.output_duration or self.output_duration or 0
+            if not 3 <= duration <= settings.max_video_duration:
+                QMessageBox.warning(self, "Длительность", "Длительность видео вне поддерживаемого диапазона.")
+                return None
+            options = {}
+            if account.provider == "tiktok":
+                privacy = self.privacy_combo.currentData()
+                if not privacy or self.creator_account_id != account.id:
+                    QMessageBox.warning(self, "TikTok", "Дождитесь настроек видимости аккаунта.")
+                    return None
+                maximum = self.creator_info.get("max_video_post_duration_sec")
+                if maximum and duration > float(maximum):
+                    QMessageBox.warning(self, "TikTok", f"Лимит этого аккаунта: {maximum} сек.")
+                    return None
+                options["privacy_level"] = privacy
+                options.update({
+                    "disable_comment": self.disable_comment.isChecked(),
+                    "disable_duet": self.disable_duet.isChecked(),
+                    "disable_stitch": self.disable_stitch.isChecked(),
+                    "brand_content_toggle": self.brand_content.isChecked(),
+                    "brand_organic_toggle": self.brand_organic.isChecked(),
+                    "is_aigc": self.ai_generated.isChecked(),
+                })
+            elif account.provider == "youtube":
+                options["youtube_privacy"] = self.privacy_combo.currentData() or "private"
+            post = Post(video_id=video.id, account_id=account.id, platform=account.provider,
+                        title=self.title_edit.text().strip(),
+                        description=self.description_edit.toPlainText().strip(),
+                        status="queued", payload_json=options)
             session.add(post)
             session.commit()
-            session.refresh(post)
-            post_id = post.id
+            return post.id
 
+    def start_publish(self) -> None:
+        if self.is_busy():
+            return
+        if QMessageBox.question(self, "Подтвердить публикацию",
+                                f"Отправить видео на {self.account_label.text()}?") != QMessageBox.StandardButton.Yes:
+            return
+        post_id = self._new_post()
+        if post_id is None:
+            return
         self.publish_button.setEnabled(False)
-        self.status_label.setText("Публикация выполняется в фоновом потоке…")
-        self.log_message.emit(f"Публикация #{post_id} запущена.")
+        self.schedule_button.setEnabled(False)
+        self.status_label.setText("Видео отправляется в фоновом потоке…")
         self.publish_worker = PublishWorker(post_id, self)
         self.publish_worker.succeeded.connect(self._publish_succeeded)
         self.publish_worker.error.connect(self._publish_failed)
@@ -211,54 +237,23 @@ class PublishWidget(QWidget):
         self.publish_worker.start()
 
     def schedule_publish(self) -> None:
-        if self.video_id is None or self.is_busy():
-            return
-        platform_id = self.platform_combo.currentData()
-        if not platform_id:
-            QMessageBox.warning(self, "Платформа не выбрана", "Выберите аккаунт Taisly.")
-            return
-        if self.output_duration is None or not 3 <= self.output_duration <= 90:
-            QMessageBox.warning(
-                self,
-                "Неверная длительность",
-                "Taisly принимает видео длительностью от 3 до 90 секунд.",
-            )
+        if self.is_busy():
             return
         when = self.schedule_time.dateTime().toPyDateTime().astimezone()
         if when <= datetime.now().astimezone():
-            QMessageBox.warning(self, "Неверное время", "Выберите время в будущем.")
+            QMessageBox.warning(self, "Время", "Выберите время в будущем.")
             return
-        with SessionLocal() as session:
-            video = session.get(Video, self.video_id)
-            if video is None or video.status != "ready":
-                QMessageBox.warning(self, "Видео не готово", "Сначала завершите обработку.")
-                return
-            post = Post(
-                video_id=video.id,
-                platform=str(platform_id),
-                title=self.title_edit.text().strip(),
-                description=self.description_edit.toPlainText().strip(),
-                status="queued",
-            )
-            session.add(post)
-            session.commit()
-            session.refresh(post)
-            post_id = post.id
+        post_id = self._new_post()
+        if post_id is None:
+            return
         try:
             schedule_post(post_id, when)
         except Exception as exc:
-            QMessageBox.critical(self, "Ошибка планирования", str(exc))
+            self.status_label.setText(f"Ошибка планирования: {exc}")
             return
         self.status_label.setText(f"Публикация запланирована на {when:%d.%m.%Y %H:%M}.")
-        self.log_message.emit(
-            f"Публикация #{post_id} запланирована на {when:%d.%m.%Y %H:%M}."
-        )
+        self.log_message.emit(f"Публикация #{post_id} запланирована.")
         self.publication_completed.emit()
-        QMessageBox.information(
-            self,
-            "Публикация запланирована",
-            f"Локальный планировщик отправит ролик {when:%d.%m.%Y в %H:%M}.",
-        )
 
     def _publish_succeeded(self, post_id: int) -> None:
         with SessionLocal() as session:
@@ -267,25 +262,49 @@ class PublishWidget(QWidget):
         self.status_label.setText(f"Статус публикации: {status}")
         self.log_message.emit(f"Публикация #{post_id}: {status}.")
         self.publication_completed.emit()
-        QMessageBox.information(
-            self,
-            "Публикация отправлена",
-            f"Текущий статус: {status}",
-        )
+        if status == "pending":
+            self.pending_post_id = post_id
+            self.status_timer.start()
+        else:
+            QMessageBox.information(self, "Публикация", f"Статус: {status}")
 
     def _publish_failed(self, message: str) -> None:
         self.status_label.setText(f"Ошибка публикации: {message}")
-        self.log_message.emit(f"Ошибка публикации: {message}")
+        self.log_message.emit(self.status_label.text())
         QMessageBox.critical(self, "Ошибка публикации", message)
 
     def _publish_finished(self) -> None:
-        valid_duration = self.output_duration is not None and 3 <= self.output_duration <= 90
-        self.publish_button.setEnabled(bool(self.video_id and valid_duration))
-        self.schedule_button.setEnabled(bool(self.video_id and valid_duration))
-        if self.publish_worker:
-            self.publish_worker.deleteLater()
-        self.publish_worker = None
+        worker, self.publish_worker = self.publish_worker, None
+        if worker:
+            worker.deleteLater()
+        self.refresh_account()
+
+    def _poll_status(self) -> None:
+        if self.pending_post_id is None or self.status_worker is not None:
+            return
+        self.status_worker = PublicationStatusWorker(self.pending_post_id, self)
+        self.status_worker.succeeded.connect(self._status_loaded)
+        self.status_worker.error.connect(self._status_failed)
+        self.status_worker.finished.connect(self._status_finished)
+        self.status_worker.start()
+
+    def _status_loaded(self, post_id: int, status: str) -> None:
+        self.status_label.setText(f"Публикация #{post_id}: {status}")
+        if status != "pending":
+            self.pending_post_id = None
+            self.status_timer.stop()
+            self.publication_completed.emit()
+
+    def _status_failed(self, message: str) -> None:
+        self.status_timer.stop()
+        self.status_label.setText(f"Проверка статуса: {message}")
+        self.log_message.emit(self.status_label.text())
+
+    def _status_finished(self) -> None:
+        worker, self.status_worker = self.status_worker, None
+        if worker:
+            worker.deleteLater()
 
     def is_busy(self) -> bool:
-        workers = (self.platform_worker, self.publish_worker)
-        return any(worker is not None and worker.isRunning() for worker in workers)
+        return any(worker is not None and worker.isRunning() for worker in (
+            self.publish_worker, self.creator_worker, self.status_worker))

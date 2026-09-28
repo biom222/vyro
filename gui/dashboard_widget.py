@@ -114,14 +114,17 @@ class DashboardWidget(QWidget):
         self.account_combo.clear()
         self.account_combo.addItem("Аккаунт не подключён", None)
         selected = 0
-        for account in list_accounts():
+        accounts = list_accounts()
+        for account in accounts:
             label = f"{account.provider.title()} · {account.display_name or account.username}"
             self.account_combo.addItem(label, account.id)
             if account.id == active_id:
                 selected = self.account_combo.count() - 1
         self.account_combo.setCurrentIndex(selected)
         self.account_combo.blockSignals(False)
-        self.sync_button.setEnabled(active_id is not None and self.sync_worker is None)
+        active_account = next((account for account in accounts if account.id == active_id), None)
+        self.sync_button.setEnabled(bool(active_account and active_account.provider == "youtube"
+                                         and self.sync_worker is None))
 
         summary = get_dashboard_summary()
         change = f"{summary.views_change:+,} к прошлому периоду" if summary.views_change else "Нет предыдущего периода"
@@ -157,7 +160,8 @@ class DashboardWidget(QWidget):
 
     def sync_analytics(self) -> None:
         account_id = get_active_account_id()
-        if account_id is None or self.sync_worker is not None:
+        account = next((item for item in list_accounts() if item.id == account_id), None)
+        if account is None or account.provider != "youtube" or self.sync_worker is not None:
             return
         self.sync_button.setEnabled(False)
         self.sync_button.setText("Синхронизация…")
@@ -182,7 +186,7 @@ class DashboardWidget(QWidget):
             self.sync_worker.deleteLater()
         self.sync_worker = None
         self.sync_button.setText("Синхронизировать аналитику")
-        self.sync_button.setEnabled(get_active_account_id() is not None)
+        self.refresh()
 
     def is_busy(self) -> bool:
         return self.sync_worker is not None and self.sync_worker.isRunning()

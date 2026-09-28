@@ -53,6 +53,29 @@ def set_flat_icon(target, standard_pixmap):
     target.setIcon(QIcon(pixmap))
 
 
+def service_icon(provider: str) -> QIcon:
+    """Small monochrome service marks for the account menu."""
+    pixmap = QPixmap(18, 18)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QApplication.palette().color(QPalette.ColorRole.Text), 1.6))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    if provider == "youtube":
+        painter.drawRoundedRect(QRectF(1.5, 4, 15, 10), 2, 2)
+        painter.drawPolygon(QPolygonF([QPointF(7, 6.5), QPointF(12, 9), QPointF(7, 11.5)]))
+    elif provider == "tiktok":
+        painter.drawLine(11, 2, 11, 12)
+        painter.drawLine(11, 3, 15, 6)
+        painter.drawEllipse(QRectF(4, 11, 7, 5))
+    elif provider == "instagram":
+        painter.drawRoundedRect(QRectF(2, 2, 14, 14), 2, 2)
+        painter.drawEllipse(QRectF(6, 6, 6, 6))
+        painter.drawPoint(13, 5)
+    painter.end()
+    return QIcon(pixmap)
+
+
 def apply_theme(window, light=False):
     app = QApplication.instance()
     app.setStyle("Fusion")

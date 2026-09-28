@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 
 from app.config import settings
 from gui.ai_clips_widget import AIClipsWidget
+from gui.accounts_menu import AccountsMenu
 from gui.calendar_widget import CalendarWidget
 from gui.dashboard_widget import DashboardWidget
 from gui.editor_workspace import EditorWorkspace
@@ -107,6 +108,11 @@ class MainWindow(QMainWindow):
 
         self.pages.currentChanged.connect(self._page_changed)
         self._build_menus()
+        self.accounts_menu = AccountsMenu(self)
+        self.accounts_menu.account_changed.connect(self._account_changed)
+        self.accounts_menu.log_message.connect(self.log)
+        self.settings_widget.account_changed.connect(self._account_changed)
+        self._account_changed()
         apply_theme(self)
         self.statusBar().showMessage("Готово")
         self.navigate("editor")
@@ -179,8 +185,8 @@ class MainWindow(QMainWindow):
             item.triggered.connect(lambda checked=False, value=light: apply_theme(self, value))
             theme_group.addAction(item)
             themes.addAction(item)
-        tools_menu.addAction("Настройки и аккаунты").triggered.connect(lambda: self.navigate("settings"))
-        self.mode_label = QLabel("Публикация: тестовый режим" if not settings.taisly_api_key else "Публикация: Taisly")
+        tools_menu.addAction("Настройки").triggered.connect(lambda: self.navigate("settings"))
+        self.mode_label = QLabel("Публикация: аккаунт не выбран")
         self.mode_label.setObjectName("muted")
         self.statusBar().addPermanentWidget(self.mode_label)
         self.editor_workspace.video_ready.connect(self._sync_actions)
@@ -218,8 +224,8 @@ class MainWindow(QMainWindow):
             self.trends_widget.refresh()
         elif page_id == "calendar":
             self.calendar_widget.refresh()
-        elif page_id == "publish" and self.publish_widget.video_id:
-            self.publish_widget.load_platforms()
+        elif page_id == "publish":
+            self.publish_widget.refresh_account()
         elif page_id == "history":
             self.history_widget.refresh()
         elif page_id == "settings":
@@ -250,6 +256,13 @@ class MainWindow(QMainWindow):
         self.calendar_widget.refresh()
         self.dashboard_widget.refresh()
 
+    def _account_changed(self) -> None:
+        self.accounts_menu.refresh()
+        self.settings_widget.refresh_accounts()
+        self.dashboard_widget.refresh()
+        self.publish_widget.refresh_account()
+        self.mode_label.setText(f"Публикация: {self.publish_widget.account_label.text()}")
+
     def log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_view.append(f"[{timestamp}] {message}")
@@ -265,7 +278,7 @@ class MainWindow(QMainWindow):
             self.history_widget,
             self.settings_widget,
         )
-        if any(widget.is_busy() for widget in widgets):
+        if self.accounts_menu.is_busy() or any(widget.is_busy() for widget in widgets):
             QMessageBox.warning(
                 self,
                 "Операция выполняется",
