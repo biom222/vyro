@@ -8,8 +8,12 @@ from typing import Any, Callable
 from sqlalchemy import update
 
 from app.config import settings
-from app.models import Post, SessionLocal, Video
-from app.publisher import publish_video as publish_to_platform
+from app.models import ConnectedAccount, Post, SessionLocal, Video
+from app.services.direct_publishing import (
+    PublicationUncertain,
+    check_direct_status,
+    publish_direct,
+)
 from app.video_processor import (
     probe_duration,
     probe_video_metadata,
@@ -106,7 +110,7 @@ def _claim_post_for_publication(post_id: int) -> None:
             update(Post)
             .where(
                 Post.id == post_id,
-                Post.status.in_(("queued", "scheduled", "dispatching", "pending", "error")),
+                Post.status.in_(("queued", "scheduled", "dispatching", "error")),
             )
             .values(
                 status="publishing",
@@ -129,38 +133,45 @@ def publish_video(post_id: int) -> None:
     try:
         with SessionLocal() as session:
             post = session.get(Post, post_id)
+            account = session.get(ConnectedAccount, post.account_id) if post.account_id else None
+            if account is None or account.status != "connected" or not account.credential_ref:
+                raise ValueError("Post has no connected direct-publishing account")
+            if post.platform != account.provider:
+                raise ValueError("Post platform does not match its selected account")
             video = session.get(Video, post.video_id)
             if video is None or video.status != "ready" or not video.output_path:
                 raise ValueError("Video is not ready for publishing")
 
             publish_duration = video.output_duration or probe_duration(video.output_path)
-            if not 3 <= publish_duration <= 90:
-                raise ValueError("Taisly accepts videos between 3 and 90 seconds")
+            if not 3 <= publish_duration <= settings.max_video_duration:
+                raise ValueError("Video duration is outside the supported editor range")
 
-            values = (video.output_path, post.platform, post.title, post.description)
+            values = (account.id, video.output_path, post.title, post.description,
+                      post.payload_json or {})
 
-        result = publish_to_platform(*values)
-        statuses = [
-            str(item.get("status", "PENDING")).upper()
-            for item in result.get("result", [])
-        ]
-        final_status = (
-            "published"
-            if statuses and all(item == "SUCCESS" for item in statuses)
-            else "pending"
-        )
+        result = publish_direct(*values)
         with SessionLocal() as session:
             post = session.get(Post, post_id)
             if post:
-                post.status = final_status
-                history_id = result.get("historyId")
-                if not history_id:
-                    raise ValueError("Publishing provider did not return a history ID")
-                post.external_id = str(history_id)
-                if final_status == "published":
+                post.status = result.status
+                post.external_id = result.external_id
+                post.external_url = result.external_url
+                if result.payload:
+                    post.payload_json = {**(post.payload_json or {}), **result.payload}
+                if result.status == "published":
                     post.published_at = datetime.now(timezone.utc)
                 post.error_message = None
                 session.commit()
+    except PublicationUncertain as exc:
+        logger.exception("Publication state is uncertain for post %s", post_id)
+        with SessionLocal() as session:
+            post = session.get(Post, post_id)
+            if post:
+                post.status = "unknown"
+                post.external_id = exc.external_id or None
+                post.error_message = str(exc)[:2000]
+                session.commit()
+        raise
     except Exception as exc:
         logger.exception("Publishing failed for post %s", post_id)
         with SessionLocal() as session:
@@ -172,6 +183,29 @@ def publish_video(post_id: int) -> None:
                 post.last_attempt_at = datetime.now(timezone.utc)
                 session.commit()
         raise
+
+
+def refresh_publication(post_id: int) -> str:
+    """Poll a pending provider publication without creating a second upload."""
+    with SessionLocal() as session:
+        post = session.get(Post, post_id)
+        if post is None or post.status not in {"pending", "unknown"}:
+            raise ValueError("Post is not waiting for a provider result")
+        if not post.account_id or not post.external_id:
+            raise ValueError("Provider did not return an ID; check the account manually")
+        values = (post.account_id, post.platform, post.external_id)
+    result = check_direct_status(*values)
+    with SessionLocal() as session:
+        post = session.get(Post, post_id)
+        if post is not None:
+            post.status = result.status
+            post.external_id = result.external_id
+            post.external_url = result.external_url
+            post.error_message = None
+            if result.status == "published":
+                post.published_at = datetime.now(timezone.utc)
+            session.commit()
+    return result.status
 
 
 def transcribe_video(video_id: int) -> int:

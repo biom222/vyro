@@ -64,7 +64,9 @@ def list_accounts() -> list[ConnectedAccount]:
     with SessionLocal() as session:
         accounts = list(
             session.scalars(
-                select(ConnectedAccount).order_by(ConnectedAccount.display_name.asc())
+                select(ConnectedAccount).order_by(
+                    ConnectedAccount.provider.asc(), ConnectedAccount.display_name.asc()
+                )
             ).all()
         )
         for account in accounts:
