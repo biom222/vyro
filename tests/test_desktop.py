@@ -37,6 +37,8 @@ from app.services.accounts import get_active_account_id, set_active_account, ups
 from app.services.analytics import AnalyticsDataError, store_youtube_snapshot, sync_youtube_analytics
 from app.services.content_pipeline import analyze_video_for_clips
 from app.services.credentials import MemoryCredentialStore
+from app.services.direct_publishing import PublicationResult
+from app.services.direct_publishing import check_direct_status, publish_direct
 from app.services.dashboard import get_dashboard_summary
 from app.services.media_library import relink_video, store_imported_video, store_project_music
 from app.services.projects import create_project_for_video
@@ -234,8 +236,9 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(video.status, "ready")
             self.assertEqual(video.output_duration, 10.0)
 
-    def test_mock_publication_updates_post(self):
+    def test_direct_publication_uses_selected_account(self):
         video_id = self.create_video("publish.mp4")
+        account_id = upsert_account("youtube", "publish-channel", "Publish channel")
         output = Path(TEST_ROOT.name, "outputs", "publish-ready.mp4")
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b"rendered")
@@ -244,9 +247,12 @@ class DesktopTests(unittest.TestCase):
             video.status = "ready"
             video.output_path = str(output)
             video.output_duration = 8.0
+            account = session.get(ConnectedAccount, account_id)
+            account.credential_ref = "youtube:test:tokens"
             post = Post(
                 video_id=video_id,
-                platform="mock-youtube",
+                account_id=account_id,
+                platform="youtube",
                 title="Demo",
                 description="Caption",
                 status="queued",
@@ -256,11 +262,15 @@ class DesktopTests(unittest.TestCase):
             session.refresh(post)
             post_id = post.id
 
-        publish_video(post_id)
+        with patch("app.tasks.publish_direct", return_value=PublicationResult(
+            "remote-id", "published", "https://www.youtube.com/watch?v=remote-id"
+        )) as direct:
+            publish_video(post_id)
+        direct.assert_called_once_with(account_id, str(output), "Demo", "Caption", {})
         with SessionLocal() as session:
             post = session.get(Post, post_id)
             self.assertEqual(post.status, "published")
-            self.assertTrue(post.external_id.startswith("mock-"))
+            self.assertEqual(post.external_id, "remote-id")
 
     def test_duplicate_publication_cannot_steal_an_active_post(self):
         video_id = self.create_video("duplicate-publish.mp4")
@@ -300,8 +310,10 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(window.pages.currentIndex(), window.page_indexes["ai"])
         window.close()
 
-    def test_platform_worker_is_not_replaced_before_queued_cleanup(self):
+    def test_publish_widget_uses_checked_account_instead_of_platform_id(self):
         video_id = self.create_video("platform-race.mp4")
+        account_id = upsert_account("youtube", "selected-channel", "Selected channel")
+        set_active_account(account_id)
         output = Path(TEST_ROOT.name, "outputs", "platform-race-ready.mp4")
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b"rendered")
@@ -310,18 +322,174 @@ class DesktopTests(unittest.TestCase):
             video.status = "ready"
             video.output_path = str(output)
             video.output_duration = 8.0
+            session.get(ConnectedAccount, account_id).credential_ref = "youtube:selected:tokens"
             session.commit()
 
         widget = PublishWidget()
         widget.set_video(video_id, str(output), 8.0)
-        first_worker = widget.platform_worker
-        self.assertIsNotNone(first_worker)
-        widget.load_platforms()
-        self.assertIs(widget.platform_worker, first_worker)
-        first_worker.wait(1000)
-        self.qt_app.processEvents()
-        self.assertIsNone(widget.platform_worker)
+        self.assertIn("Selected channel", widget.account_label.text())
+        self.assertTrue(widget.publish_button.isEnabled())
+        post_id = widget._new_post()
+        with SessionLocal() as session:
+            post = session.get(Post, post_id)
+            self.assertEqual(post.account_id, account_id)
+            self.assertEqual(post.platform, "youtube")
+            self.assertEqual(post.payload_json["youtube_privacy"], "private")
         widget.close()
+
+    def test_accounts_menu_checks_only_selected_account(self):
+        first = upsert_account("youtube", "menu-youtube", "Menu YouTube")
+        second = upsert_account("instagram", "menu-instagram", "Menu Instagram")
+        with SessionLocal() as session:
+            session.get(ConnectedAccount, first).credential_ref = "youtube:menu"
+            session.get(ConnectedAccount, second).credential_ref = "instagram:menu"
+            session.commit()
+        set_active_account(first)
+        window = MainWindow()
+        accounts_menu = window.accounts_menu
+        youtube_menu = next(action.menu() for action in accounts_menu.menu.actions()
+                            if action.text() == "YouTube")
+        instagram_menu = next(action.menu() for action in accounts_menu.menu.actions()
+                              if action.text() == "Instagram")
+        self.assertTrue(next(action for action in youtube_menu.actions()
+                             if action.text() == "Menu YouTube").isChecked())
+        self.assertFalse(next(action for action in instagram_menu.actions()
+                              if action.text() == "Menu Instagram").isChecked())
+        self.assertEqual(instagram_menu.actions()[-1].text(), "Добавить аккаунт…")
+        accounts_menu.select_account(second)
+        self.assertEqual(get_active_account_id(), second)
+        self.assertIn("Menu Instagram", window.publish_widget.account_label.text())
+        window.close()
+
+    def test_direct_youtube_upload_uses_requested_privacy(self):
+        account_id = upsert_account("youtube", "api-youtube", "API YouTube")
+        with SessionLocal() as session:
+            session.get(ConnectedAccount, account_id).credential_ref = "youtube:api"
+            session.commit()
+        path = Path(TEST_ROOT.name, "youtube-api.mp4")
+        path.write_bytes(b"small-video")
+        observed = []
+        def handler(request):
+            observed.append(request)
+            if request.method == "POST":
+                return httpx.Response(200, headers={
+                    "Location": "https://www.googleapis.com/upload/session/1"})
+            return httpx.Response(200, json={"id": "youtube-video"})
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client, patch(
+            "app.services.direct_publishing.get_valid_access_token", return_value="test-token"
+        ):
+            result = publish_direct(account_id, path, "Title", "Description",
+                                    {"youtube_privacy": "unlisted"}, client=client)
+        self.assertEqual(result.external_id, "youtube-video")
+        self.assertEqual(observed[0].url.host, "www.googleapis.com")
+        self.assertEqual(json.loads(observed[0].content)["status"]["privacyStatus"], "unlisted")
+        self.assertEqual(observed[1].content, b"small-video")
+
+    def test_direct_tiktok_upload_and_status(self):
+        account_id = upsert_account("tiktok", "api-tiktok", "API TikTok")
+        with SessionLocal() as session:
+            session.get(ConnectedAccount, account_id).credential_ref = "tiktok:api"
+            session.commit()
+        path = Path(TEST_ROOT.name, "tiktok-api.mp4")
+        path.write_bytes(b"small-video")
+        observed = []
+        def handler(request):
+            observed.append(request)
+            if request.url.path.endswith("/creator_info/query/"):
+                return httpx.Response(200, json={"error": {"code": "ok"}, "data": {
+                    "privacy_level_options": ["SELF_ONLY"], "max_video_post_duration_sec": 60}})
+            if request.url.path.endswith("/video/init/"):
+                return httpx.Response(200, json={"error": {"code": "ok"}, "data": {
+                    "publish_id": "pub-1", "upload_url": "https://upload.tiktokapis.com/chunk"}})
+            if request.url.path.endswith("/status/fetch/"):
+                return httpx.Response(200, json={"error": {"code": "ok"}, "data": {
+                    "status": "PUBLISH_COMPLETE"}})
+            return httpx.Response(200)
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client, patch(
+            "app.services.direct_publishing.get_social_access_token", return_value="test-token"
+        ):
+            result = publish_direct(account_id, path, "Title", "",
+                                    {"privacy_level": "SELF_ONLY"}, client=client)
+            status = check_direct_status(account_id, "tiktok", result.external_id, client=client)
+        self.assertEqual(result.status, "pending")
+        self.assertEqual(status.status, "published")
+        self.assertEqual(observed[2].headers["content-range"], "bytes 0-10/11")
+
+    def test_direct_instagram_upload_and_publish(self):
+        account_id = upsert_account("instagram", "ig-account", "API Instagram")
+        with SessionLocal() as session:
+            session.get(ConnectedAccount, account_id).credential_ref = "instagram:api"
+            session.commit()
+        path = Path(TEST_ROOT.name, "instagram-api.mp4")
+        path.write_bytes(b"small-video")
+        observed = []
+        def handler(request):
+            observed.append(request)
+            if request.url.path.endswith("/ig-account/media"):
+                return httpx.Response(200, json={
+                    "id": "container-1", "uri": "https://rupload.facebook.com/ig-api-upload/v23.0/container-1"})
+            if request.url.host == "rupload.facebook.com":
+                return httpx.Response(200, json={"success": True})
+            if request.url.path.endswith("/container-1"):
+                return httpx.Response(200, json={"status_code": "FINISHED"})
+            if request.url.path.endswith("/media_publish"):
+                return httpx.Response(200, json={"id": "media-1"})
+            return httpx.Response(404)
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client, patch(
+            "app.services.direct_publishing.get_social_access_token", return_value="test-token"
+        ):
+            result = publish_direct(account_id, path, "Title", "Description", client=client)
+            status = check_direct_status(account_id, "instagram", result.external_id, client=client)
+        self.assertEqual(result.status, "pending")
+        self.assertEqual(status.external_id, "media-1")
+        self.assertEqual(status.status, "published")
+        self.assertIsNone(status.external_url)
+        self.assertEqual(observed[1].content, b"small-video")
+
+    def test_tiktok_oauth_connects_and_stores_account_tokens(self):
+        from app.services.social_oauth import connect_tiktok
+        store = MemoryCredentialStore()
+        def handler(request):
+            if request.url.path.endswith("/oauth/token/"):
+                return httpx.Response(200, json={
+                    "access_token": "access", "refresh_token": "refresh",
+                    "expires_in": 3600, "scope": "user.info.basic,video.publish"})
+            return httpx.Response(200, json={"error": {"code": "ok"}, "data": {
+                "user": {"open_id": "oauth-tiktok", "display_name": "TikTok creator"}}})
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client, patch.object(
+            settings, "tiktok_client_key", "key"
+        ), patch.object(settings, "tiktok_client_secret", "secret"), patch(
+            "app.services.social_oauth._loopback_code", return_value="auth-code"
+        ):
+            account_id = connect_tiktok(client=client, store=store)
+        with SessionLocal() as session:
+            account = session.get(ConnectedAccount, account_id)
+            self.assertEqual(account.provider, "tiktok")
+            self.assertEqual(account.external_id, "oauth-tiktok")
+            self.assertEqual(json.loads(store.get(account.credential_ref))["refresh_token"], "refresh")
+        self.assertEqual(get_active_account_id(), account_id)
+
+    def test_instagram_oauth_connects_linked_professional_account(self):
+        from app.services.social_oauth import connect_instagram
+        store = MemoryCredentialStore()
+        def handler(request):
+            if request.url.path.endswith("/me/accounts"):
+                return httpx.Response(200, json={"data": [{
+                    "id": "page-1", "access_token": "page-token",
+                    "instagram_business_account": {"id": "ig-oauth", "username": "creator"}}]})
+            return httpx.Response(200, json={"access_token": "user-token"})
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client, patch.object(
+            settings, "instagram_app_id", "app-id"
+        ), patch.object(settings, "instagram_app_secret", "secret"), patch(
+            "app.services.social_oauth._loopback_code", return_value="auth-code"
+        ):
+            account_ids = connect_instagram(client=client, store=store)
+        self.assertEqual(len(account_ids), 1)
+        with SessionLocal() as session:
+            account = session.get(ConnectedAccount, account_ids[0])
+            self.assertEqual(account.provider, "instagram")
+            self.assertEqual(account.username, "creator")
+            self.assertEqual(json.loads(store.get(account.credential_ref))["access_token"], "page-token")
 
     def test_database_is_at_alembic_head(self):
         self.assertEqual(current_revision(), head_revision())

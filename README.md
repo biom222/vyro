@@ -16,8 +16,8 @@ Cross-platform PyQt6 desktop application for trimming, positioning a vertical cr
 - Time trim, optional 1080×1920 crop with manual horizontal positioning, and Unicode text overlay
 - Stage-based render progress without blocking the interface
 - Save As export for completed MP4 files
-- Taisly platforms and publishing through background threads
-- Safe mock publishing when `TAISLY_API_KEY` is empty
+- Direct YouTube, TikTok, and Instagram account connection and publishing in background threads
+- Top Accounts menu with per-service account submenus and a checked active publishing target
 - SQLite history with details and repeat publishing
 - Speech-to-text and AI clip suggestions with one-click transfer to the editor
 - Local FFmpeg scene-change suggestions (visual cuts only, not semantic ranking)
@@ -221,16 +221,15 @@ logs, virtual environments, and PyInstaller output are ignored. Never commit API
 OAuth credentials, or project footage. Build the desktop executable locally with
 `python build_desktop.py`; the entire `dist/vyro/` directory is needed to run it.
 
-## Taisly
+## Direct account connection and publication
 
-Leave `TAISLY_API_KEY` empty to use mock platforms and simulated successful publications. For live publishing:
+Copy `.env.example` to `.env` and register developer applications with the providers you plan to use. Set `YOUTUBE_CLIENT_ID`/`YOUTUBE_CLIENT_SECRET`, `TIKTOK_CLIENT_KEY`/`TIKTOK_CLIENT_SECRET`, and/or `INSTAGRAM_APP_ID`/`INSTAGRAM_APP_SECRET`. Register the exact corresponding loopback redirect URI shown in `.env.example` with each provider. Enable the upload/publishing scopes and obtain any required app approval.
 
-1. Connect accounts in Taisly.
-2. Generate an API key in Taisly settings.
-3. Set `TAISLY_API_KEY=taisly_...` in `.env`.
-4. Restart the application.
+Open **Аккаунты** in the top menu, hover over a service, and choose **Добавить аккаунт…**. Authorization opens in the browser. Connected accounts appear under that service; a check mark identifies the current publishing target. Choose an account before going to **Публикация**. The post stores that account ID, so changing the menu selection later will not redirect a scheduled post. OAuth tokens are kept in the operating system credential store; do not put account tokens in the repository.
 
-The client first retrieves connected accounts from `GET /platform/platforms`, then uploads the video through `POST /post`. Taisly accepts final videos between 3 and 90 seconds; the desktop application checks that range before publishing.
+The publication screen offers the selected account's TikTok privacy options or YouTube visibility. Confirm the target before sending. Instagram publication supports professional accounts connected to a Facebook Page and creates Reels. TikTok and Instagram can remain in a pending state while the provider processes the upload; vyro polls for completion without uploading a second copy. If the provider's response is uncertain, inspect the account before retrying. With no developer keys, the editor and export still work, but live publication is unavailable; the old Taisly mock is no longer used by the desktop workflow.
+
+Provider restrictions apply: YouTube uploads from unverified API projects can be private-only, TikTok unaudited clients are restricted to private viewing, and Instagram requires a professional account and applicable Meta permissions. These are provider-side requirements, not settings vyro can bypass.
 
 ## Project structure
 
@@ -239,13 +238,14 @@ app/
   config.py             Environment settings
   models.py             SQLAlchemy models and SQLite initialization
   video_processor.py    FFprobe and FFmpeg pipeline
-  publisher.py          Taisly REST client and mock mode
+  publisher.py          Legacy web-prototype Taisly client (unused by desktop)
   tasks.py              Synchronous local operations
   cli.py                Headless commands and diagnostics
-  services/             Projects, managed media, AI, transcription, trends, analytics, OAuth, scheduler
+  services/             Projects, media, AI, trends, direct publishing, OAuth, scheduler
 gui/
   worker.py             QThread workers
   main_window.py        Top menus, action toolbar, page navigation, and log
+  accounts_menu.py      Service icons, connected account submenus, and active target
   theme.py              Shared flat palette, system fonts, and monochrome icons
   dashboard_widget.py   Active-account metrics and recent videos
   editor_workspace.py   Preview player, timeline, upload, and render controls
@@ -258,7 +258,7 @@ gui/
   settings_widget.py    OAuth accounts, modes, and environment health
   upload_widget.py      Video selection and metadata inspection
   edit_widget.py        Edit controls, progress, and export
-  publish_widget.py     Platform loading and publishing
+  publish_widget.py     Account-targeted direct publishing and status polling
   history_widget.py     SQLite project history and repeat publishing
 main.py                 Desktop entry point
 ```
@@ -284,7 +284,7 @@ It creates test media, an isolated database, and screenshots under `work/editor-
 
 They cover Alembic upgrades, database updates, projects, transcripts, subtitle formats, AI contracts, trend snapshots,
 OAuth refresh, idempotent analytics, scheduler failure isolation, duplicate-publication protection,
-OAuth channel connection, background scheduler lifecycle, probe/render contracts, mock publishing, and construction of
+OAuth channel connection, mocked direct API upload contracts, background scheduler lifecycle, probe/render contracts, and construction of
 the complete eight-section workspace.
 
 An optional containerized headless check remains available:
