@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app.config import settings
+from app.config import ENV_FILE, settings
 from app.services.accounts import get_active_account_id, list_accounts, set_active_account
 from app.services.health import run_health_checks
 from gui.components import page_header
@@ -66,6 +66,9 @@ class SettingsWidget(QWidget):
             "Публикация:", QLabel("Прямые API YouTube, TikTok и Instagram")
         )
         config.addRow("База данных:", QLabel(settings.database_url))
+        env_label = QLabel(str(ENV_FILE))
+        env_label.setWordWrap(True)
+        config.addRow("Файл настроек:", env_label)
         layout.addWidget(config_group)
 
         health_header = QHBoxLayout()

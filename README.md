@@ -220,6 +220,10 @@ Personal `.env` files, SQLite databases, imported media, rendered videos, AI mod
 logs, virtual environments, and PyInstaller output are ignored. Never commit API keys,
 OAuth credentials, or project footage. Build the desktop executable locally with
 `python build_desktop.py`; the entire `dist/vyro/` directory is needed to run it.
+The executable inside this checkout reads the checkout's `.env` while keeping its media
+and database in the application data directory. A copy distributed outside the checkout
+reads `.env` from that application data directory instead. The Settings page shows the
+actual configuration path so a stale or separately installed executable is easy to identify.
 
 ## Direct account connection and publication
 

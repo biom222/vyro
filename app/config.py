@@ -25,6 +25,22 @@ def _application_data_root() -> Path:
 PROJECT_ROOT = _application_data_root() if getattr(sys, "frozen", False) else SOURCE_ROOT
 
 
+def _settings_env_file() -> Path:
+    """Use checkout settings for a bundle run in its build tree, not for releases."""
+    if not getattr(sys, "frozen", False):
+        return SOURCE_ROOT / ".env"
+    executable = Path(sys.executable).resolve()
+    checkout = executable.parent.parent.parent
+    if (executable.parent.parent.name == "dist"
+            and (checkout / "main.py").is_file()
+            and (checkout / ".env").is_file()):
+        return checkout / ".env"
+    return PROJECT_ROOT / ".env"
+
+
+ENV_FILE = _settings_env_file()
+
+
 class Settings(BaseSettings):
     app_name: str = "vyro"
     database_url: str = "sqlite:///./video_editor.sqlite3"
@@ -78,7 +94,7 @@ class Settings(BaseSettings):
     scheduler_batch_size: int = Field(default=10, ge=1, le=100)
 
     model_config = SettingsConfigDict(
-        env_file=PROJECT_ROOT / ".env",
+        env_file=ENV_FILE,
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",

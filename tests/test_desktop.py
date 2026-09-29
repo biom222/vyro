@@ -2,6 +2,7 @@ import os
 import json
 import tempfile
 import unittest
+import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -31,6 +32,7 @@ from app.models import (
     init_db,
 )
 from app.config import settings
+from app import config as app_config
 from app.database import current_revision, head_revision
 from app.services.ai import MockContentAssistant, OpenAIContentAssistant
 from app.services.accounts import get_active_account_id, set_active_account, upsert_account
@@ -90,6 +92,13 @@ class DesktopTests(unittest.TestCase):
             session.commit()
             session.refresh(video)
             return video.id
+
+    def test_bundle_in_checkout_uses_project_env(self):
+        executable = app_config.SOURCE_ROOT / "dist" / "vyro" / "vyro.exe"
+        with patch.object(sys, "frozen", True, create=True), patch.object(
+            sys, "executable", str(executable)
+        ):
+            self.assertEqual(app_config._settings_env_file(), app_config.SOURCE_ROOT / ".env")
 
     def test_title_keyframes_and_project_video_layers(self):
         primary_id = self.create_video("layer-primary.mp4")
