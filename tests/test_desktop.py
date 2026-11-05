@@ -319,7 +319,7 @@ class DesktopTests(unittest.TestCase):
                 "Тренды",
                 "Календарь",
                 "Публикация",
-                "История",
+                "Проекты",
                 "Настройки",
             ],
         )
@@ -915,6 +915,141 @@ class DesktopTests(unittest.TestCase):
             "clips": [{"video_id": video_id, "start_time": 0, "end_time": 8}],
             "title_layers": [], "video_layers": [], "editor": {}, "music_path": "", "dirty": True}
 
+    def test_library_recency_rename_delete_preserves_shared_media(self):
+        from sqlalchemy import select
+        from app.services.library import mark_opened, recent_projects, rename_project, delete_project, library_inventory
+        from app.services.projects import duplicate_project
+        from app.services.project_state import save_project_state, load_project_state
+        from app.models import ProjectRevision
+        project_id, state = self.safety_project()
+        save_project_state(project_id, state, 0)
+        duplicate_id, duplicate_video = duplicate_project(project_id, "Library copy")
+        with SessionLocal() as session:
+            source = Path(session.get(Video, state["primary_id"]).original_path)
+        output = Path(TEST_ROOT.name, "retained-library.mp4")
+        output.write_bytes(b"export")
+        with SessionLocal.begin() as session:
+            video = session.get(Video, state["primary_id"])
+            video.output_path = str(output)
+            session.add(Post(video_id=video.id, platform="youtube", title="Retained", status="published"))
+        mark_opened(project_id)
+        mark_opened(duplicate_id)
+        mark_opened(project_id)
+        self.assertEqual([p["id"] for p in recent_projects()][:2], [project_id, duplicate_id])
+        rename_project(project_id, "Новое название")
+        self.assertEqual(recent_projects()[0]["name"], "Новое название")
+        delete_project(project_id, 1)
+        with SessionLocal() as session:
+            self.assertIsNone(session.get(Project, project_id))
+            self.assertIsNone(session.get(Video, state["primary_id"]).project_id)
+            self.assertEqual(session.get(Video, duplicate_video).project_id, duplicate_id)
+            self.assertIsNone(session.get(ProjectRevision, (project_id, 1)))
+            self.assertIsNotNone(session.scalar(select(Post).where(Post.video_id == state["primary_id"])))
+        self.assertEqual(source.read_bytes(), b"video")
+        self.assertEqual(output.read_bytes(), b"export")
+        self.assertEqual(load_project_state(duplicate_id).revision, 1)
+        self.assertNotIn(project_id, [p["id"] for p in recent_projects()])
+        rows = library_inventory()
+        self.assertIn(duplicate_id, [p["id"] for p in rows["projects"]])
+
+    def test_library_delete_refuses_changed_or_inflight_projects(self):
+        from app.services.library import delete_project
+        from app.services.project_state import save_project_state, ProjectConflict
+        project_id, state = self.safety_project()
+        save_project_state(project_id, state, 0)
+        with self.assertRaises(ProjectConflict):
+            delete_project(project_id, 0)
+        for status in ("queued", "scheduled", "dispatching", "publishing", "pending", "unknown"):
+            with SessionLocal.begin() as session:
+                post = Post(video_id=state["primary_id"], platform="youtube", title="In flight", status=status)
+                session.add(post)
+                session.flush()
+                post_id = post.id
+            with self.assertRaisesRegex(ValueError, "публикац"):
+                delete_project(project_id, 1)
+            with SessionLocal.begin() as session:
+                session.get(Post, post_id).status = "published"
+        with SessionLocal.begin() as session:
+            session.get(Video, state["primary_id"]).status = "processing"
+        with self.assertRaisesRegex(ValueError, "обработки"):
+            delete_project(project_id, 1)
+
+    def test_relink_commits_snapshot_and_rolls_back_all_database_changes_on_failure(self):
+        from app.services.project_state import save_project_state, load_project_state
+        project_id, state = self.safety_project()
+        state["dirty"] = False
+        save_project_state(project_id, state, 0)
+        with SessionLocal() as session:
+            original = session.get(Video, state["primary_id"]).original_path
+        replacement = Path(TEST_ROOT.name, "relink-atomic.mp4")
+        replacement.write_bytes(b"replacement")
+        before = set(settings.upload_folder.glob("*"))
+        with patch("app.video_processor.probe_video_metadata", return_value=(10, 640, 360)):
+            with patch("app.services.project_state._store_snapshot", side_effect=RuntimeError("snapshot failed")):
+                with self.assertRaisesRegex(RuntimeError, "snapshot failed"):
+                    relink_video(state["primary_id"], replacement)
+            with SessionLocal() as session:
+                self.assertEqual(session.get(Video, state["primary_id"]).original_path, original)
+            self.assertEqual(set(settings.upload_folder.glob("*")), before)
+            self.assertEqual(load_project_state(project_id).revision, 1)
+            result = relink_video(state["primary_id"], replacement)
+        loaded = load_project_state(project_id)
+        self.assertEqual(loaded.revision, 2)
+        self.assertTrue(loaded.state["dirty"])
+        self.assertEqual(result.read_bytes(), b"replacement")
+        self.assertEqual(Path(original).read_bytes(), b"video")
+
+    def test_copy_export_cancellation_and_failure_preserve_destination(self):
+        from app.services.media_library import copy_export
+        from app.media_process import RenderControl, RenderCancelled
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory, "export.mp4"), Path(directory, "copy.mp4")
+            source.write_bytes(b"x" * (3 * 1024 * 1024))
+            target.write_bytes(b"old destination")
+            control = RenderControl()
+            with self.assertRaises(RenderCancelled):
+                copy_export(source, target, lambda percent: control.cancel(), control)
+            self.assertEqual(target.read_bytes(), b"old destination")
+            self.assertFalse(list(Path(directory).glob("*.part")))
+            with patch("app.services.media_library.os.replace", side_effect=OSError("disk unavailable")):
+                with self.assertRaises(OSError):
+                    copy_export(source, target)
+            self.assertEqual(target.read_bytes(), b"old destination")
+            copy_export(source, target)
+            self.assertEqual(target.read_bytes(), source.read_bytes())
+            with self.assertRaises(ValueError):
+                copy_export(source, source)
+            video_id = self.create_video("copy-protected.mp4")
+            with SessionLocal() as session:
+                protected = session.get(Video, video_id).original_path
+            with self.assertRaises(ValueError):
+                copy_export(source, protected)
+
+    def test_media_metadata_thumbnail_cache_invalidates_and_repairs_corruption(self):
+        from app.services.media_library import inspect_media
+        video_id = self.create_video("thumbnail-cache.mp4")
+        payload = {"streams": [{"codec_type": "video", "width": 10, "height": 20, "codec_name": "h264"}],
+                   "format": {"duration": "10"}}
+        def execute(command, **kwargs):
+            if "-show_streams" in command:
+                return json.dumps(payload)
+            Path(command[-1]).write_bytes(b"thumbnail")
+            return ""
+        with patch("app.media_process.execute", side_effect=execute) as runner:
+            first = inspect_media(video_id)
+            self.assertEqual(runner.call_count, 2)
+            self.assertEqual(inspect_media(video_id), first)
+            self.assertEqual(runner.call_count, 2)
+            signature = Path(first["thumbnail"]).stem.replace("thumbnail-", "")
+            (settings.cache_folder / f"media-{signature}.json").write_text("[]", encoding="utf-8")
+            inspect_media(video_id)
+            self.assertEqual(runner.call_count, 4)
+            with SessionLocal() as session:
+                source = Path(session.get(Video, video_id).original_path)
+            source.write_bytes(b"modified video content")
+            changed = inspect_media(video_id)
+            self.assertNotEqual(first["thumbnail"], changed["thumbnail"])
+
     def test_project_revisions_are_atomic_recoverable_and_conflict_checked(self):
         from app.models import AppPreference, ProjectRevision
         from app.services.project_state import (draft_key, load_project_state, save_project_state,
@@ -944,9 +1079,16 @@ class DesktopTests(unittest.TestCase):
         from gui.history_widget import HistoryWidget
         from PyQt6.QtCore import Qt
         history = HistoryWidget()
-        row = next(row for row in range(history.projects_table.rowCount())
-                   if history.projects_table.item(row, 0).text() == str(project_id))
-        self.assertEqual(history.projects_table.item(row, 0).data(Qt.ItemDataRole.UserRole), state["primary_id"])
+        from PyQt6.QtTest import QTest
+        history.refresh()
+        for _ in range(500):
+            if not history.is_busy():
+                break
+            QTest.qWait(20)
+        self.assertFalse(history.is_busy())
+        row = next(row for row in range(history.projects_proxy.rowCount())
+                   if history.projects_proxy.index(row, 0).data() == str(project_id))
+        self.assertEqual(history.projects_proxy.index(row, 0).data(Qt.ItemDataRole.UserRole), state["primary_id"])
         history.close()
         recovered = load_project_state(project_id)
         self.assertTrue(recovered.recovered)

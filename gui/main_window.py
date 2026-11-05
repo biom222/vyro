@@ -37,7 +37,7 @@ class MainWindow(QMainWindow):
         ("trends", "", "Тренды"),
         ("calendar", "", "Календарь"),
         ("publish", "", "Публикация"),
-        ("history", "", "История"),
+        ("history", "", "Проекты"),
         ("settings", "", "Настройки"),
     )
 
@@ -63,6 +63,9 @@ class MainWindow(QMainWindow):
         self.publish_widget = PublishWidget()
         self.history_widget = HistoryWidget()
         self.history_widget.before_duplicate = self.editor_workspace.save_project
+        self.history_widget.before_delete = self._prepare_library_change
+        self.history_widget.before_relink = self._prepare_relink
+        self.history_widget.project_deleted.connect(self._project_deleted)
         self.settings_widget = SettingsWidget()
 
         page_widgets = (
@@ -154,6 +157,9 @@ class MainWindow(QMainWindow):
         self.save_project_action = action(file_menu, "Сохранить проект", QStyle.StandardPixmap.SP_DialogSaveButton,
                                           self.editor_workspace.save_project, "Ctrl+S")
         file_menu.addAction("Открыть проект…").triggered.connect(lambda: self.navigate("history"))
+        file_menu.addAction("Открыть последний проект").triggered.connect(self._open_last_project)
+        self.recent_menu = file_menu.addMenu("Недавние проекты")
+        self.recent_menu.aboutToShow.connect(self._refresh_recent_menu)
         self.save_project_as_action = file_menu.addAction("Сохранить проект как…")
         self.save_project_as_action.setShortcut("Ctrl+Shift+S")
         self.save_project_as_action.triggered.connect(self.editor_workspace.save_project_as)
@@ -246,6 +252,54 @@ class MainWindow(QMainWindow):
         self.editor_workspace.open_existing(video_id)
         self.navigate("editor")
 
+    def _refresh_recent_menu(self):
+        from app.services.library import recent_projects
+        self.recent_menu.clear()
+        for project in recent_projects():
+            item = self.recent_menu.addAction(project["name"])
+            item.triggered.connect(lambda checked=False, vid=project["video_id"]: self._open_project(vid))
+        if self.recent_menu.isEmpty():
+            self.recent_menu.addAction("Недавних проектов пока нет").setEnabled(False)
+
+    def _open_last_project(self):
+        from app.services.library import recent_projects
+        projects = recent_projects()
+        if projects:
+            self._open_project(projects[0]["video_id"])
+        else:
+            self.navigate("history")
+
+    def _prepare_library_change(self, project_id):
+        if self.editor_workspace.is_busy() or self.publish_widget.is_busy() or self.ai_widget.is_busy():
+            QMessageBox.warning(self, "Операция выполняется", "Дождитесь завершения обработки или публикации.")
+            return False
+        return self.editor_workspace.save_project() if self.editor_workspace.project_id == project_id else True
+
+    def _project_deleted(self, project_id):
+        if self.editor_workspace.project_id == project_id:
+            self.editor_workspace.close_project()
+            self.publish_widget.clear_video()
+            self._sync_actions()
+        if self.ai_widget.project_id == project_id:
+            self.ai_widget.clear_context()
+        self.upload_widget.refresh_library()
+        self.dashboard_widget.refresh()
+        self.statusBar().showMessage("Проект удалён; исходники и экспорты сохранены")
+
+    def _prepare_relink(self, video_id):
+        from app.models import SessionLocal, Video
+        with SessionLocal() as session:
+            video = session.get(Video, video_id)
+            project_id = video.project_id if video else None
+        if not self._prepare_library_change(project_id):
+            return False
+        if project_id is not None and self.editor_workspace.project_id == project_id:
+            self.editor_workspace.close_project()
+            self.publish_widget.clear_video()
+            self.ai_widget.clear_context()
+            self._sync_actions()
+        return True
+
     def navigate(self, page_id: str) -> None:
         index = self.page_indexes.get(page_id)
         if index is None:
@@ -272,6 +326,8 @@ class MainWindow(QMainWindow):
             self.settings_widget.refresh_health()
 
     def _on_video_ready(self, project_id: int, video_id: int) -> None:
+        from app.services.library import mark_opened
+        mark_opened(project_id)
         if not self.edit_widget.output_path:
             self.publish_widget.clear_video()
         self.publish_widget.restore_draft(self.editor_workspace.publication_draft)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 from PyQt6.QtCore import pyqtSignal
@@ -24,7 +23,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.models import AppPreference, EditParams, SessionLocal, Video
-from gui.worker import RenderWorker
+from gui.worker import RenderWorker, ExportCopyWorker
 
 
 class EditWidget(QFrame):
@@ -43,6 +42,7 @@ class EditWidget(QFrame):
         self.video_id: int | None = None
         self.output_path: str | None = None
         self.worker: RenderWorker | None = None
+        self.copy_worker = None
         self.sequence_provider = None
 
         layout = QVBoxLayout(self)
@@ -150,6 +150,8 @@ class EditWidget(QFrame):
         self.save_button.setObjectName("secondaryButton")
         self.save_button.clicked.connect(self.save_as)
         self.publish_button = QPushButton("Публикация →")
+        self.reveal_button = QPushButton("Показать файл")
+        self.reveal_button.clicked.connect(self.reveal_output)
         self.publish_button.setObjectName("secondaryButton")
         self.publish_button.clicked.connect(self.publish_requested.emit)
         result_row.addWidget(self.save_button)
@@ -159,6 +161,7 @@ class EditWidget(QFrame):
 
         self.save_button.setVisible(False)
         self.publish_button.setVisible(False)
+        self.reveal_button.hide()
         self.start_time.valueChanged.connect(self._emit_range)
         self.end_time.valueChanged.connect(self._emit_range)
         self.subtitle_edit.textChanged.connect(self.overlay_changed.emit)
@@ -207,6 +210,7 @@ class EditWidget(QFrame):
         self.progress.setFormat("Готово к экспорту")
         self.save_button.setVisible(False)
         self.publish_button.setVisible(False)
+        self.reveal_button.setVisible(False)
         self.setEnabled(True)
         self.render_button.setEnabled(True)
         self.range_changed.emit(0.0, duration)
@@ -312,6 +316,8 @@ class EditWidget(QFrame):
         self.progress.setFormat("Остановка FFmpeg…")
         if self.worker:
             self.worker.cancel()
+        if self.copy_worker:
+            self.copy_worker.cancel()
         self.cancel_requested.emit()
 
     def _render_cancelled(self) -> None:
@@ -325,6 +331,7 @@ class EditWidget(QFrame):
         self.progress.setFormat("Экспорт готов · 100%")
         self.save_button.setVisible(True)
         self.publish_button.setVisible(True)
+        self.reveal_button.show()
         self.log_message.emit(
             f"Экспорт завершён: {Path(output_path).name}, {duration:.1f} сек."
         )
@@ -352,13 +359,18 @@ class EditWidget(QFrame):
         self.busy_changed.emit(False)
 
     def save_as(self) -> None:
+        from app.services.library import preference
+        if self.is_busy():
+            return
         if not self.output_path or not Path(self.output_path).is_file():
             QMessageBox.warning(self, "Файл недоступен", "Сначала экспортируйте видео.")
             return
+        directory = preference("export.directory")
+        directory = Path(directory) if isinstance(directory, str) and directory else Path.home()
         destination, _ = QFileDialog.getSaveFileName(
             self,
             "Сохранить готовое видео",
-            Path(self.output_path).name,
+            str(directory / Path(self.output_path).name),
             "MP4 video (*.mp4)",
         )
         if not destination:
@@ -366,13 +378,53 @@ class EditWidget(QFrame):
         target = Path(destination)
         if target.suffix.lower() != ".mp4":
             target = target.with_suffix(".mp4")
-        try:
-            shutil.copy2(self.output_path, target)
-        except OSError as exc:
-            QMessageBox.critical(self, "Ошибка сохранения", str(exc))
-            return
-        self.log_message.emit(f"Копия сохранена: {target}")
-        QMessageBox.information(self, "Сохранено", f"Видео сохранено:\n{target}")
+            if target.exists() and QMessageBox.question(self, "Заменить файл?", f"Файл уже существует:\n{target}\nЗаменить его?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
+        worker = ExportCopyWorker(self.output_path, str(target), self)
+        self.copy_worker = worker
+        self.busy_changed.emit(True)
+        self.render_button.setEnabled(False)
+        self.cancel_button.show()
+        self.cancel_button.setEnabled(True)
+        self.progress.setValue(0)
+        self.progress.setFormat("Сохранение копии · %p%")
+        self.save_button.setEnabled(False)
+        self.publish_button.setEnabled(False)
+        worker.progress.connect(self.progress.setValue)
+        worker.succeeded.connect(self._copy_succeeded)
+        worker.error.connect(self._copy_failed)
+        worker.cancelled.connect(lambda: self.progress.setFormat("Сохранение копии отменено"))
+        worker.finished.connect(self._copy_finished)
+        worker.start()
+
+    def _copy_succeeded(self, path):
+        from app.services.library import set_preference
+        set_preference("export.directory", str(Path(path).parent))
+        set_preference("export.last_copy", path)
+        self.progress.setFormat("Копия сохранена · 100%")
+        self.log_message.emit(f"Копия сохранена: {path}")
+        QMessageBox.information(self, "Сохранено", f"Видео сохранено:\n{path}")
+
+    def _copy_finished(self):
+        self.copy_worker.deleteLater()
+        self.copy_worker = None
+        self.cancel_button.hide()
+        self.render_button.setEnabled(self.video_id is not None)
+        self.save_button.setEnabled(True)
+        self.publish_button.setEnabled(True)
+        self.busy_changed.emit(False)
+
+    def _copy_failed(self, message):
+        self.progress.setValue(0)
+        self.progress.setFormat("Ошибка сохранения копии")
+        self.log_message.emit("Копия не сохранена: " + message)
+        QMessageBox.warning(self, "Копия не сохранена", message)
+
+    def reveal_output(self):
+        from gui.local_files import reveal_file
+        reveal_file(self.output_path, self)
 
     def is_busy(self) -> bool:
-        return self.worker is not None
+        return self.worker is not None or self.copy_worker is not None

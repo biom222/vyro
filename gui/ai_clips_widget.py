@@ -110,6 +110,13 @@ class AIClipsWidget(QWidget):
         self.context_label.setText(f"Проект #{project_id} · {name}")
         self.refresh()
 
+    def clear_context(self) -> None:
+        self.project_id = self.video_id = None
+        self.context_label.setText("Выберите проект в редакторе")
+        self.transcript_view.clear()
+        self.table.setRowCount(0)
+        self._update_enabled()
+
     def refresh(self) -> None:
         if self.video_id is None:
             self._update_enabled()

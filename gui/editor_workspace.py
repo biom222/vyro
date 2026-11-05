@@ -253,7 +253,7 @@ class EditorWorkspace(QWidget):
         root.addWidget(vertical_splitter, 1)
         export_status = QHBoxLayout()
         for widget in (self.edit_widget.progress, self.edit_widget.cancel_button,
-                       self.edit_widget.save_button, self.edit_widget.publish_button):
+                       self.edit_widget.save_button, self.edit_widget.reveal_button, self.edit_widget.publish_button):
             export_status.addWidget(widget, 1 if widget is self.edit_widget.progress else 0)
         root.addLayout(export_status)
 
@@ -521,6 +521,45 @@ class EditorWorkspace(QWidget):
         self._pending_preview_time = None
         self.player.stop()
 
+    def close_project(self) -> None:
+        """Detach an already-saved/deleted project without writing a new draft."""
+        if self.is_busy():
+            raise ValueError("Дождитесь завершения фоновой операции редактора.")
+        self._restoring_sequence = True
+        self._sequence_playback = False
+        self.shutdown_preview()
+        self._draft_timer.stop()
+        self.project_id = self.video_id = None
+        self.source_path = None
+        self._saved_revision = 0
+        self._effect_preview_active = False
+        self._generation += 1
+        self.player.setSource(QUrl())
+        self.sequence_widget.set_clips(0, [])
+        self.layers_widget.set_layers([], 0)
+        self.video_layers_widget.set_layers([], [], 0)
+        self.timeline.set_media(0, "Видео не добавлено")
+        self.canvas.clear()
+        self.canvas.message = "Добавьте видео или откройте проект"
+        self.canvas.update()
+        self.edit_widget.video_id = None
+        self.edit_widget.output_path = None
+        self.edit_widget.setEnabled(False)
+        self.edit_widget.render_button.setEnabled(False)
+        self.ai_button.setEnabled(False)
+        self.play_button.setEnabled(False)
+        self.edit_widget.save_button.hide()
+        self.edit_widget.publish_button.hide()
+        self.edit_widget.reveal_button.hide()
+        self.edit_widget.progress.setValue(0)
+        self.edit_widget.progress.setFormat("Проект не открыт")
+        self.project_label.setText("Новый проект · добавьте исходное видео")
+        self.publication_draft = {}
+        self._unsaved_changes = False
+        self._restoring_sequence = False
+        self.save_state_changed.emit(False, "Проект не открыт")
+        self.processing_changed.emit(False)
+
     def release_preview(self) -> None:
         """Detach Qt Multimedia before QApplication destroys platform resources."""
         self._closing = True
@@ -638,6 +677,7 @@ class EditorWorkspace(QWidget):
             self.edit_widget.output_path = video.output_path
             self.edit_widget.save_button.show()
             self.edit_widget.publish_button.show()
+            self.edit_widget.reveal_button.show()
             self.render_completed.emit(video_id, video.output_path, video.output_duration or 0)
         self.video_ready.emit(project_id, video_id)
         self._unsaved_changes = False
@@ -1006,6 +1046,7 @@ class EditorWorkspace(QWidget):
         self.edit_widget.output_path = None
         self.edit_widget.save_button.hide()
         self.edit_widget.publish_button.hide()
+        self.edit_widget.reveal_button.hide()
         self.edit_widget.progress.setValue(0)
         self.edit_widget.progress.setFormat("Изменения не экспортированы")
         self.edit_widget.busy_changed.emit(False)

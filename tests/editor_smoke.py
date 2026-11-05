@@ -158,7 +158,8 @@ def main():
     draft_id = editor.video_id
     editor.save_project()
     window.history_widget.refresh()
-    assert window.history_widget.projects_table.rowCount() >= 1
+    wait_for(lambda: not window.history_widget.is_busy())
+    assert window.history_widget.projects_proxy.rowCount() >= 1
     window.history_widget.open_project_for_row(0)
     wait_for(lambda: not editor.is_busy())
     assert editor.video_id == draft_id

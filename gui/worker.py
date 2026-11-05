@@ -72,6 +72,59 @@ class RelinkWorker(QThread):
             self.error.emit(str(exc))
 
 
+class LibraryWorker(QThread):
+    succeeded = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def run(self) -> None:
+        try:
+            from app.services.library import library_inventory
+            self.succeeded.emit(library_inventory())
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class MediaInfoWorker(QThread):
+    succeeded = pyqtSignal(int, object)
+    error = pyqtSignal(str)
+
+    def __init__(self, video_id, parent=None):
+        super().__init__(parent)
+        self.video_id = video_id
+
+    def run(self):
+        try:
+            from app.services.media_library import inspect_media
+            self.succeeded.emit(self.video_id, inspect_media(self.video_id))
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class ExportCopyWorker(QThread):
+    progress = pyqtSignal(int)
+    succeeded = pyqtSignal(str)
+    cancelled = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, source, destination, parent=None):
+        super().__init__(parent)
+        self.source, self.destination = source, destination
+        self.control = RenderControl()
+
+    def cancel(self):
+        self.control.cancel()
+
+    def run(self):
+        from app.services.media_library import copy_export
+        try:
+            path = copy_export(self.source, self.destination, self.progress.emit, self.control)
+            self.succeeded.emit(str(path))
+        except RenderCancelled:
+            self.cancelled.emit()
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
 class AudioImportWorker(QThread):
     progress = pyqtSignal(int)
     succeeded = pyqtSignal(str)
