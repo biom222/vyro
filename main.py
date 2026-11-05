@@ -6,7 +6,9 @@ import faulthandler
 import sys
 import traceback
 
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtCore import QLockFile
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import settings
 from app.models import init_db
@@ -15,8 +17,48 @@ from app.tasks import run_scheduled_publications
 from gui.main_window import MainWindow
 
 
+def initialize_database_with_recovery() -> bool:
+    from app.database import DatabaseSafetyError, restore_database
+    while True:
+        try:
+            init_db()
+            return True
+        except (DatabaseSafetyError, SQLAlchemyError, OSError):
+            logging.getLogger(__name__).exception("Database startup failed")
+            answer = QMessageBox.question(None, "База данных недоступна",
+                "Не удалось безопасно открыть или обновить базу данных. Исходный файл и резервные копии сохранены. "
+                "Восстановить базу из проверенной резервной копии?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+            filename, _filter = QFileDialog.getOpenFileName(None, "Выберите резервную копию базы",
+                str(settings.data_folder / "backups"), "SQLite backup (*.bak *.sqlite3);;All files (*)")
+            if not filename:
+                return False
+            try:
+                from pathlib import Path
+                restore_database(Path(filename))
+            except (DatabaseSafetyError, OSError):
+                logging.getLogger(__name__).exception("Database restore failed")
+                QMessageBox.warning(None, "Восстановление не выполнено",
+                    "Выбранная копия не прошла проверку или недоступна. Текущий файл сохранён.")
+
+
 def run() -> int:
-    settings.ensure_directories()
+    qt_app = QApplication(sys.argv)
+    qt_app.setStyle("Fusion")
+    qt_app.setApplicationName(settings.app_name)
+    qt_app.setOrganizationName("vyro")
+    try:
+        settings.ensure_directories()
+    except OSError:
+        QMessageBox.critical(None, "Папка данных недоступна",
+            "Не удалось открыть папку проектов. Проверьте доступ и свободное место. Существующие данные не удалены.")
+        return 1
+    instance_lock = QLockFile(str(settings.data_folder / "vyro.lock"))
+    if not instance_lock.tryLock(0):
+        QMessageBox.information(None, "vyro уже запущен", "Откройте существующее окно vyro. Повторный запуск не изменяет проекты.")
+        return 1
     log_path = settings.data_folder / "vyro.log"
     log_format = logging.Formatter(
         "%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -43,12 +85,15 @@ def run() -> int:
         "a", encoding="utf-8"
     )
     faulthandler.enable(file=crash_log, all_threads=True)
-    init_db()
-
-    qt_app = QApplication(sys.argv)
-    qt_app.setStyle("Fusion")
-    qt_app.setApplicationName(settings.app_name)
-    qt_app.setOrganizationName("vyro")
+    if not initialize_database_with_recovery():
+        faulthandler.disable()
+        crash_log.close()
+        instance_lock.unlock()
+        return 1
+    from app.services.storage import cleanup_stale_artifacts
+    removed = cleanup_stale_artifacts()
+    if removed:
+        logging.getLogger(__name__).info("Removed %s stale disposable artifacts; media files retained", len(removed))
 
     def handle_exception(exc_type, exc_value, exc_traceback) -> None:
         logging.getLogger(__name__).critical(
@@ -75,6 +120,7 @@ def run() -> int:
         scheduler.stop()
         faulthandler.disable()
         crash_log.close()
+        instance_lock.unlock()
 
 
 def self_test() -> int:

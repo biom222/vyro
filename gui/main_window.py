@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
         self.calendar_widget = CalendarWidget()
         self.publish_widget = PublishWidget()
         self.history_widget = HistoryWidget()
+        self.history_widget.before_duplicate = self.editor_workspace.save_project
         self.settings_widget = SettingsWidget()
 
         page_widgets = (
@@ -101,6 +102,11 @@ class MainWindow(QMainWindow):
         self.history_widget.open_requested.connect(self._open_project)
         self.ai_widget.edit_clip_requested.connect(self._edit_ai_clip)
         self.publish_widget.publication_completed.connect(self._publication_completed)
+        self.publish_widget.draft_changed.connect(self.editor_workspace.set_publication_draft)
+        self.save_state_label = QLabel("Проект не открыт")
+        self.save_state_label.setObjectName("muted")
+        self.statusBar().addPermanentWidget(self.save_state_label)
+        self.editor_workspace.save_state_changed.connect(lambda pending, text: self.save_state_label.setText(text))
         self.settings_widget.account_changed.connect(self.dashboard_widget.refresh)
         for widget in page_widgets:
             if hasattr(widget, "log_message"):
@@ -147,10 +153,13 @@ class MainWindow(QMainWindow):
         self.save_project_action = action(file_menu, "Сохранить проект", QStyle.StandardPixmap.SP_DialogSaveButton,
                                           self.editor_workspace.save_project, "Ctrl+S")
         file_menu.addAction("Открыть проект…").triggered.connect(lambda: self.navigate("history"))
+        self.save_project_as_action = file_menu.addAction("Сохранить проект как…")
+        self.save_project_as_action.setShortcut("Ctrl+Shift+S")
+        self.save_project_as_action.triggered.connect(self.editor_workspace.save_project_as)
         self.export_action = action(file_menu, "Экспорт MP4", QStyle.StandardPixmap.SP_DialogSaveButton,
                                    self.edit_widget.start_render, "Ctrl+E")
         self.save_action = action(file_menu, "Сохранить копию", QStyle.StandardPixmap.SP_DialogSaveButton,
-                                 self.edit_widget.save_as, "Ctrl+Shift+S")
+                                 self.edit_widget.save_as, "Ctrl+Alt+S")
         file_menu.addSeparator()
         exit_action = file_menu.addAction("Выход")
         exit_action.triggered.connect(self.close)
@@ -196,6 +205,7 @@ class MainWindow(QMainWindow):
 
     def _sync_actions(self, *args) -> None:
         self.save_project_action.setEnabled(self.editor_workspace.project_id is not None and not self.edit_widget.is_busy())
+        self.save_project_as_action.setEnabled(self.save_project_action.isEnabled())
         self.export_action.setEnabled(self.edit_widget.video_id is not None and not self.edit_widget.is_busy())
         self.save_action.setEnabled(bool(self.edit_widget.output_path) and not self.edit_widget.is_busy())
 
@@ -233,6 +243,10 @@ class MainWindow(QMainWindow):
             self.settings_widget.refresh_health()
 
     def _on_video_ready(self, project_id: int, video_id: int) -> None:
+        if not self.edit_widget.output_path:
+            self.publish_widget.clear_video()
+        self.publish_widget.restore_draft(self.editor_workspace.publication_draft)
+        self._account_changed()
         self.ai_widget.set_context(project_id, video_id)
         self.history_widget.refresh()
         self.dashboard_widget.refresh()
@@ -261,6 +275,7 @@ class MainWindow(QMainWindow):
         self.settings_widget.refresh_accounts()
         self.dashboard_widget.refresh()
         self.publish_widget.refresh_account()
+        self.editor_workspace.set_publication_draft(self.publish_widget.publication_draft())
         self.mode_label.setText(f"Публикация: {self.publish_widget.account_label.text()}")
 
     def log(self, message: str) -> None:
@@ -286,6 +301,8 @@ class MainWindow(QMainWindow):
             )
             event.ignore()
             return
-        self.editor_workspace.save_project(silent=True)
+        if not self.editor_workspace.save_project():
+            event.ignore()
+            return
         self.editor_workspace.player.stop()
         event.accept()

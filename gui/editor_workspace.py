@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import copy
+import logging
 
 from sqlalchemy.exc import SQLAlchemyError
 from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
@@ -10,6 +12,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QComboBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -23,7 +26,8 @@ from PyQt6.QtWidgets import (
 )
 
 from app.services.projects import create_project_for_video, add_video_to_project
-from app.models import AppPreference, Project, SessionLocal, Video, utc_now
+from app.services.project_state import load_project_state, save_project_state, ProjectStateError
+from app.models import AppPreference, SessionLocal, Video
 from gui.edit_widget import EditWidget
 from gui.timeline_widget import TimelineWidget
 from gui.upload_widget import UploadWidget
@@ -41,6 +45,7 @@ class EditorWorkspace(QWidget):
     publish_requested = pyqtSignal()
     ai_requested = pyqtSignal()
     log_message = pyqtSignal(str)
+    save_state_changed = pyqtSignal(bool, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -65,6 +70,9 @@ class EditorWorkspace(QWidget):
         self._effect_restore_index = 0
         self._effect_restore_position = 0.0
         self._draft_dirty = True
+        self._saved_revision = 0
+        self.publication_draft: dict = {}
+        self._unsaved_changes = False
         self._draft_timer = QTimer(self)
         self._draft_timer.setSingleShot(True)
         self._draft_timer.setInterval(400)
@@ -301,7 +309,8 @@ class EditorWorkspace(QWidget):
             self.editor_tabs.setCurrentWidget(self.sequence_scroll)
             self.log_message.emit(f"Клип #{video_id} добавлен в проект #{self.project_id}.")
             return
-        self.save_project(silent=True)
+        if not self.save_project():
+            return
         self._leave_effect_preview(restore=False)
         self._sequence_playback = False
         self._append_next_video = False
@@ -313,6 +322,8 @@ class EditorWorkspace(QWidget):
         self.source_path = source_path
         project = create_project_for_video(video_id, Path(display_name).stem)
         self.project_id = project.id
+        self._saved_revision = 0
+        self.publication_draft = {}
         self._restoring_sequence = True
         self.sequence_widget.set_clips(video_id, [{"video_id": video_id, "name": display_name,
             "duration": duration, "start_time": 0.0, "end_time": duration}])
@@ -361,7 +372,8 @@ class EditorWorkspace(QWidget):
 
         if self.is_busy():
             return
-        self.save_project(silent=True)
+        if not self.save_project():
+            return
         self._leave_effect_preview(restore=False)
         self._sequence_playback = False
         with SessionLocal() as session:
@@ -372,8 +384,13 @@ class EditorWorkspace(QWidget):
             preference = session.get(AppPreference, f"editor.video.{video_id}")
             saved = preference.value_json if preference and isinstance(preference.value_json, dict) else {}
             project_id = video.project_id
-            sequence_pref = session.get(AppPreference, f"editor.project.{project_id}.sequence") if project_id else None
-            sequence_saved = sequence_pref.value_json if sequence_pref and isinstance(sequence_pref.value_json, dict) else {}
+            try:
+                loaded = load_project_state(project_id) if project_id else None
+            except (ProjectStateError, SQLAlchemyError):
+                logging.getLogger(__name__).exception("Could not open project %s", project_id)
+                QMessageBox.warning(self, "Проект недоступен", "Не удалось прочитать проект. Сохранённые версии и исходные файлы не удалены.")
+                return
+            sequence_saved = loaded.state if loaded else {}
             draft_editor = sequence_saved.get("editor") if isinstance(sequence_saved.get("editor"), dict) else {}
             primary_id = sequence_saved.get("primary_id", video_id)
             if primary_id != video_id:
@@ -388,6 +405,8 @@ class EditorWorkspace(QWidget):
             QMessageBox.warning(self, "Исходник недоступен", "Файл был перемещён или удалён. Добавьте его заново.")
             return
         project_id = video.project_id or create_project_for_video(video_id).id
+        self._saved_revision = loaded.revision if loaded else 0
+        self.publication_draft = copy.deepcopy(sequence_saved.get("publication", {}))
         self._restoring_sequence = True
         self.load_clip(video_id, project_id, edit.start_time if edit else 0, (edit.end_time if edit else None) or video.duration)
         clips = []
@@ -432,7 +451,7 @@ class EditorWorkspace(QWidget):
         for combo, key, default in ((self.edit_widget.text_position, "text_position", "bottom"),
                                     (self.edit_widget.font_color, "font_color", "white")):
             combo.setCurrentIndex(max(0, combo.findData(draft_editor.get(key, saved.get(key, default)))))
-        self._draft_dirty = bool(sequence_saved.get("dirty", not bool(video.output_path)))
+        self._draft_dirty = bool(sequence_saved.get("dirty", not bool(video.output_path))) or bool(loaded and loaded.recovered)
         self._update_overlay_position()
         self._restoring_sequence = False
         self._preview_sequence_clip(self.sequence_widget.table.currentIndex().row())
@@ -446,9 +465,20 @@ class EditorWorkspace(QWidget):
             self.edit_widget.publish_button.show()
             self.render_completed.emit(video_id, video.output_path, video.output_duration or 0)
         self.video_ready.emit(project_id, video_id)
+        self._unsaved_changes = False
+        self.save_state_changed.emit(False, "Восстановлена сохранённая версия" if loaded and loaded.recovered else "Все изменения сохранены")
+        if loaded and loaded.recovered:
+            self.log_message.emit("Текущий черновик повреждён. Открыта последняя проверенная сохранённая версия.")
 
     def load_clip(self, video_id: int, project_id: int, start: float, end: float) -> None:
         from app.models import SessionLocal, Video
+
+        if not self._restoring_sequence and project_id != self.project_id:
+            if not self.save_project():
+                return
+            loaded = load_project_state(project_id)
+            self._saved_revision = loaded.revision
+            self.publication_draft = copy.deepcopy(loaded.state.get("publication", {}))
 
         with SessionLocal() as session:
             video = session.get(Video, video_id)
@@ -673,35 +703,36 @@ class EditorWorkspace(QWidget):
     def _schedule_draft_save(self) -> None:
         if (not self._restoring_sequence and not self._effect_preview_active
                 and self.project_id is not None and self.video_id is not None):
+            self._unsaved_changes = True
+            self.save_state_changed.emit(True, "Есть несохранённые изменения")
             self._draft_timer.start()
 
     def _write_draft(self) -> bool:
         if self.project_id is None or self.video_id is None or self._restoring_sequence:
             return False
-        state = {"schema_version": 1, "primary_id": self.video_id,
+        try:
+            state = self.current_project_state()
+            self._saved_revision = save_project_state(self.project_id, state, self._saved_revision)
+        except (SQLAlchemyError, ValueError, TypeError, OSError):
+            logging.getLogger(__name__).exception("Could not save project %s", self.project_id)
+            self._unsaved_changes = True
+            self.save_state_changed.emit(True, "Ошибка сохранения — повторите Ctrl+S")
+            self.log_message.emit(f"Не удалось сохранить проект #{self.project_id}. Предыдущая версия сохранена; окно останется открытым.")
+            return False
+        self._unsaved_changes = False
+        self.save_state_changed.emit(False, "Все изменения сохранены")
+        return True
+
+    def current_project_state(self) -> dict:
+        return {"schema_version": 1, "primary_id": self.video_id,
                  **self.sequence_widget.render_params(),
                  "title_layers": self.layers_widget.export_layers(),
                  "video_layers": self.video_layers_widget.export_layers(),
                  "editor": self.edit_widget.current_params(),
                  "active_index": max(0, self.sequence_widget.table.currentIndex().row()),
                  "playhead": self.player.position() / 1000,
+                 "publication": copy.deepcopy(self.publication_draft),
                  "dirty": self._draft_dirty}
-        try:
-            with SessionLocal() as session:
-                key = f"editor.project.{self.project_id}.sequence"
-                preference = session.get(AppPreference, key)
-                if preference is None:
-                    preference = AppPreference(key=key)
-                    session.add(preference)
-                preference.value_json = state
-                project = session.get(Project, self.project_id)
-                if project is not None:
-                    project.updated_at = utc_now()
-                session.commit()
-        except SQLAlchemyError as exc:
-            self.log_message.emit(f"Не удалось сохранить проект #{self.project_id}: {exc}")
-            return False
-        return True
 
     def _sequence_duration(self) -> float:
         clips = self.sequence_widget.clips
@@ -715,13 +746,40 @@ class EditorWorkspace(QWidget):
                 "title_layers": self.layers_widget.export_layers(),
                 "video_layers": self.video_layers_widget.export_layers()}
 
-    def save_project(self, silent: bool = False) -> None:
+    def save_project(self, silent: bool = False) -> bool:
         if self.project_id is None or self.video_id is None:
-            return
+            return True
         self._draft_timer.stop()
         saved = self._write_draft()
         if saved and not silent:
             self.log_message.emit(f"Проект #{self.project_id} сохранён в SQLite без экспорта MP4.")
+        if not saved and not silent:
+            QMessageBox.warning(self, "Проект не сохранён", "Не удалось записать изменения. Окно остаётся открытым. Проверьте свободное место и доступ к папке данных; затем повторите Ctrl+S.")
+        return saved
+
+    def set_publication_draft(self, state: dict) -> None:
+        if self.publication_draft != state:
+            self.publication_draft = copy.deepcopy(state)
+            self._schedule_draft_save()
+
+    def save_project_as(self) -> None:
+        from app.services.projects import duplicate_project
+        if self.project_id is None or self.is_busy():
+            return
+        self.save_project(silent=True)
+        name, accepted = QInputDialog.getText(self, "Сохранить проект как", "Название независимой копии проекта:")
+        if not accepted:
+            return
+        try:
+            _project_id, video_id = duplicate_project(self.project_id, name, self.current_project_state())
+            # The independent copy now contains pending edits, including a conflict's
+            # unsaved state. Do not retry writing the old project before switching.
+            self.project_id = None
+            self.video_id = None
+            self.open_existing(video_id)
+        except (ValueError, SQLAlchemyError):
+            logging.getLogger(__name__).exception("Could not duplicate project")
+            QMessageBox.warning(self, "Копия не создана", "Не удалось создать копию. Исходный проект сохранён.")
 
     def _mark_modified(self) -> None:
         if self._restoring_sequence or self.project_id is None or self.video_id is None:

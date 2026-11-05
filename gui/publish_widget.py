@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
 
 from app.config import settings
 from app.models import ConnectedAccount, Post, SessionLocal, Video
-from app.services.accounts import get_active_account_id
+from app.services.accounts import get_active_account_id, set_active_account
 from app.services.scheduler import schedule_post
 from gui.worker import PublicationStatusWorker, PublishWorker, TikTokCreatorInfoWorker
 
@@ -19,6 +19,7 @@ from gui.worker import PublicationStatusWorker, PublishWorker, TikTokCreatorInfo
 class PublishWidget(QWidget):
     publication_completed = pyqtSignal()
     log_message = pyqtSignal(str)
+    draft_changed = pyqtSignal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -32,6 +33,9 @@ class PublishWidget(QWidget):
         self.creator_account_id: int | None = None
         self.creator_info: dict = {}
         self.creator_error = False
+        self._restoring_draft = False
+        self._refreshing_account = False
+        self._saved_options: dict = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
@@ -104,13 +108,66 @@ class PublishWidget(QWidget):
         self.status_timer.setInterval(10000)
         self.status_timer.timeout.connect(self._poll_status)
         self.refresh_account()
+        self.title_edit.textChanged.connect(self._emit_draft)
+        self.description_edit.textChanged.connect(self._emit_draft)
+        self.privacy_combo.currentIndexChanged.connect(self._emit_draft)
+        for checkbox in (self.disable_comment, self.disable_duet, self.disable_stitch,
+                         self.brand_content, self.brand_organic, self.ai_generated):
+            checkbox.toggled.connect(self._emit_draft)
+
+    def publication_draft(self) -> dict:
+        options = dict(self._saved_options)
+        privacy = self.privacy_combo.currentData()
+        if privacy in {"private", "unlisted", "public"}:
+            options["youtube_privacy"] = privacy
+        elif privacy:
+            options["privacy_level"] = privacy
+        for checkbox, key in ((self.disable_comment, "disable_comment"), (self.disable_duet, "disable_duet"),
+                              (self.disable_stitch, "disable_stitch"), (self.brand_content, "brand_content_toggle"),
+                              (self.brand_organic, "brand_organic_toggle"), (self.ai_generated, "is_aigc")):
+            options[key] = checkbox.isChecked()
+        return {"account_id": get_active_account_id(), "title": self.title_edit.text(),
+                "description": self.description_edit.toPlainText(), "options": options}
+
+    def _emit_draft(self, *args) -> None:
+        if not self._restoring_draft and not self._refreshing_account:
+            state = self.publication_draft()
+            self._saved_options = state["options"]
+            self.draft_changed.emit(state)
+
+    def restore_draft(self, state: dict) -> None:
+        self._restoring_draft = True
+        try:
+            if "account_id" in state:
+                with SessionLocal() as session:
+                    selected = state["account_id"]
+                    available = session.get(ConnectedAccount, selected) if selected else None
+                set_active_account(selected if available else None)
+            self.title_edit.setText(str(state.get("title") or ""))
+            self.description_edit.setPlainText(str(state.get("description") or ""))
+            self._saved_options = dict(state.get("options") or {})
+            for checkbox, key in ((self.disable_comment, "disable_comment"), (self.disable_duet, "disable_duet"),
+                                  (self.disable_stitch, "disable_stitch"), (self.brand_content, "brand_content_toggle"),
+                                  (self.brand_organic, "brand_organic_toggle"), (self.ai_generated, "is_aigc")):
+                checkbox.setChecked(bool(self._saved_options.get(key)))
+            self.refresh_account()
+        finally:
+            self._restoring_draft = False
 
     def set_video(self, video_id: int, output_path: str, duration: float) -> None:
         self.video_id, self.output_path, self.output_duration = video_id, output_path, duration
         self.video_label.setText(f"{Path(output_path).name} · {duration:.1f} сек.\n{output_path}")
         self.refresh_account()
 
+    def clear_video(self) -> None:
+        self.video_id = None
+        self.output_path = None
+        self.output_duration = None
+        self.video_label.setText("Обработанное видео ещё не выбрано.")
+        self.refresh_account()
+
     def refresh_account(self) -> None:
+        self._refreshing_account = True
         account_id = get_active_account_id()
         with SessionLocal() as session:
             account = session.get(ConnectedAccount, account_id) if account_id else None
@@ -147,6 +204,11 @@ class PublishWidget(QWidget):
                 self.creator_worker.start()
         elif provider == "instagram":
             self.privacy_combo.addItem("Публичный Reel")
+        selected_privacy = self._saved_options.get("youtube_privacy" if provider == "youtube" else "privacy_level")
+        if selected_privacy:
+            index = self.privacy_combo.findData(selected_privacy)
+            if index >= 0:
+                self.privacy_combo.setCurrentIndex(index)
         valid = bool(self.video_id and self.output_duration is not None
                      and 3 <= self.output_duration <= settings.max_video_duration
                      and self.output_path and Path(self.output_path).is_file())
@@ -157,6 +219,7 @@ class PublishWidget(QWidget):
             self.status_label.setText("Подключите и выберите аккаунт в верхнем меню «Аккаунты».")
         elif self.output_duration is not None and not valid:
             self.status_label.setText(f"Для публикации нужно готовое MP4 длительностью от 3 до {settings.max_video_duration:.0f} сек.")
+        self._refreshing_account = False
 
     def _creator_loaded(self, account_id: int, info: dict) -> None:
         self.creator_account_id, self.creator_info = account_id, info
@@ -210,6 +273,7 @@ class PublishWidget(QWidget):
                 })
             elif account.provider == "youtube":
                 options["youtube_privacy"] = self.privacy_combo.currentData() or "private"
+            options.update({"media_path": str(Path(video.output_path).resolve()), "media_duration": duration})
             post = Post(video_id=video.id, account_id=account.id, platform=account.provider,
                         title=self.title_edit.text().strip(),
                         description=self.description_edit.toPlainText().strip(),

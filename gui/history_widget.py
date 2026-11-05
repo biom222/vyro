@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -20,8 +21,9 @@ from PyQt6.QtWidgets import (
 )
 from sqlalchemy import select
 
-from app.models import AppPreference, Post, Project, SessionLocal, Video
+from app.models import Post, Project, SessionLocal, Video
 from gui.worker import PublishWorker, RelinkWorker
+from app.services.project_state import load_project_state, ProjectStateError
 
 
 class HistoryWidget(QWidget):
@@ -32,6 +34,7 @@ class HistoryWidget(QWidget):
         super().__init__(parent)
         self.workers: dict[int, PublishWorker] = {}
         self.relink_workers: dict[int, RelinkWorker] = {}
+        self.before_duplicate = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -50,6 +53,9 @@ class HistoryWidget(QWidget):
         self.refresh_button.clicked.connect(self.refresh)
         header.addLayout(title_box, 1)
         header.addWidget(self.refresh_button)
+        duplicate_button = QPushButton("Дублировать проект…")
+        duplicate_button.clicked.connect(self.duplicate_selected_project)
+        header.addWidget(duplicate_button)
         layout.addLayout(header)
 
         self.tabs = QTabWidget()
@@ -91,10 +97,14 @@ class HistoryWidget(QWidget):
             projects = list(session.scalars(select(Project).order_by(Project.updated_at.desc())))
             project_rows = []
             for project in projects:
-                preference = session.get(AppPreference, f"editor.project.{project.id}.sequence")
-                state = preference.value_json if preference and isinstance(preference.value_json, dict) else {}
+                try:
+                    loaded = load_project_state(project.id)
+                    state = loaded.state
+                except ProjectStateError:
+                    state = {}
                 members = list(session.scalars(select(Video).where(Video.project_id == project.id).order_by(Video.id)))
-                primary_id = state.get("primary_id") or (members[0].id if members else None)
+                primary_id = state.get("primary_id") if isinstance(state.get("primary_id"), int) else None
+                primary_id = primary_id or (members[0].id if members else None)
                 project_rows.append((project, primary_id, state))
             videos = list(
                 session.scalars(select(Video).order_by(Video.created_at.desc()))
@@ -137,6 +147,29 @@ class HistoryWidget(QWidget):
         item = self.projects_table.item(row, 0)
         if item is not None and item.data(Qt.ItemDataRole.UserRole) is not None:
             self.open_requested.emit(int(item.data(Qt.ItemDataRole.UserRole)))
+
+    def duplicate_selected_project(self) -> None:
+        from app.services.projects import duplicate_project
+        from sqlalchemy.exc import SQLAlchemyError
+        if self.before_duplicate is not None and not self.before_duplicate():
+            return
+        row = self.projects_table.currentRow()
+        item = self.projects_table.item(row, 0) if row >= 0 else None
+        if item is None:
+            QMessageBox.information(self, "Выберите проект", "Выберите проект в таблице.")
+            return
+        name, accepted = QInputDialog.getText(self, "Дублировать проект", "Название независимой копии:")
+        if not accepted:
+            return
+        try:
+            _project_id, video_id = duplicate_project(int(item.text()), name)
+        except (ValueError, SQLAlchemyError):
+            import logging
+            logging.getLogger(__name__).exception("Could not duplicate project")
+            QMessageBox.warning(self, "Копия не создана", "Не удалось создать копию. Сначала сохраните исходный проект.")
+            return
+        self.refresh()
+        self.open_requested.emit(video_id)
 
     def open_details_for_row(self, row: int) -> None:
         item = self.table.item(row, 0)
