@@ -5,7 +5,7 @@ Cross-platform PyQt6 desktop application for trimming, positioning a vertical cr
 Current stage: technical desktop alpha, not a production release. The local FFmpeg
 editor has real smoke verification; YouTube has a recorded live private-upload check
 including remote processing/privacy and restart verification (see
-[Phase 5 report](docs/PHASE5_REPORT.md)). TikTok, Instagram, AI and analytics still
+[Phase 5 report](docs/PHASE5_REPORT.md)). TikTok, AI and analytics still
 have contract tests rather than recorded live end-to-end verification. Start with the audited
 [product status](docs/PRODUCT_STATUS.md) and [production roadmap](docs/PRODUCTION_ROADMAP.md)
 before treating a feature list as a release guarantee.
@@ -30,7 +30,7 @@ before treating a feature list as a release guarantee.
 - FFmpeg encoding progress plus effect stages, cancellation from the toolbar (Ctrl+.) and inspector
 - Saved source/common FPS and Standard/High quality presets; bounded media-tool timeouts
 - Save As export for completed MP4 files
-- Direct YouTube, TikTok, and Instagram account connection and publishing in background threads
+- Direct YouTube and TikTok account connection and publishing in background threads
 - Top Accounts menu with per-service account submenus and a checked active publishing target
 - SQLite history with details and repeat publishing
 - Speech-to-text and AI clip suggestions with one-click transfer to the editor
@@ -261,11 +261,15 @@ actual configuration path so a stale or separately installed executable is easy 
 
 ## Direct account connection and publication
 
-Copy `.env.example` to `.env` and register developer applications with the providers you plan to use. Set `YOUTUBE_CLIENT_ID`/`YOUTUBE_CLIENT_SECRET`, `TIKTOK_CLIENT_KEY`/`TIKTOK_CLIENT_SECRET`, and/or `INSTAGRAM_APP_ID`/`INSTAGRAM_APP_SECRET`. Register the exact corresponding loopback redirect URI shown in `.env.example` with each provider. Enable the upload/publishing scopes and obtain any required app approval.
+Copy `.env.example` to `.env` and register developer applications with the providers you plan to use. Set `YOUTUBE_CLIENT_ID`/`YOUTUBE_CLIENT_SECRET` and/or `TIKTOK_CLIENT_KEY`/`TIKTOK_CLIENT_SECRET`. Register the exact corresponding loopback redirect URI shown in `.env.example` with each provider. Enable the upload/publishing scopes and obtain any required app approval.
 
 Open **Аккаунты** in the top menu, hover over a service, and choose **Добавить аккаунт…**. Authorization opens in the browser. Connected accounts appear under that service; a check mark identifies the current publishing target. Choose an account before going to **Публикация**. The post stores that account ID, so changing the menu selection later will not redirect a scheduled post. OAuth tokens are kept in the operating system credential store; do not put account tokens in the repository.
 
-The publication screen offers the selected account's TikTok privacy options or YouTube visibility. Confirm the target before sending. Instagram publication supports professional accounts connected to a Facebook Page and creates Reels. TikTok and Instagram can remain in a pending state while the provider processes the upload; vyro polls for completion without uploading a second copy. If the provider's response is uncertain, inspect the account before retrying. With no developer keys, the editor and export still work, but live publication is unavailable; the old Taisly mock is no longer used by the desktop workflow.
+The publication screen offers the selected account's TikTok privacy options or YouTube visibility. Confirm the target before sending. Uploads can remain pending while the provider processes them; vyro polls for completion without uploading a second copy. If the provider's response is uncertain, inspect the account before retrying. With no developer keys, the editor and export still work, but live publication is unavailable; the old Taisly mock is no longer used by the desktop workflow.
+
+Only YouTube and TikTok are supported. Removed-provider account/history rows are retained
+for data safety but cannot be selected, connected, scheduled or published. Old project
+drafts referencing them open with no publishing account selected.
 
 Live access depends on each provider's current account capabilities, permissions and
 approval conditions. Those gates must be verified during the corresponding live phase;

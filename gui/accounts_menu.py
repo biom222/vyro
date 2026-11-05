@@ -12,7 +12,7 @@ from gui.theme import service_icon
 from gui.worker import AccountConnectWorker
 
 
-SERVICES = (("youtube", "YouTube"), ("tiktok", "TikTok"), ("instagram", "Instagram"))
+SERVICES = (("youtube", "YouTube"), ("tiktok", "TikTok"))
 
 
 class AccountsMenu(QObject):
@@ -85,8 +85,9 @@ class AccountsMenu(QObject):
         required = {
             "youtube": bool(settings.youtube_client_id and settings.youtube_client_secret),
             "tiktok": bool(settings.tiktok_client_key and settings.tiktok_client_secret),
-            "instagram": bool(settings.instagram_app_id and settings.instagram_app_secret),
         }
+        if provider not in required:
+            return
         if not required[provider]:
             QMessageBox.warning(
                 self.menu.parentWidget(), "Настройка API",

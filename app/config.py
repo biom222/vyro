@@ -81,10 +81,6 @@ class Settings(BaseSettings):
     tiktok_client_key: str = ""
     tiktok_client_secret: str = Field(default="", repr=False)
     tiktok_redirect_uri: str = "http://127.0.0.1:8766/oauth/callback"
-    instagram_app_id: str = ""
-    instagram_app_secret: str = Field(default="", repr=False)
-    instagram_redirect_uri: str = "http://127.0.0.1:8767/oauth/callback"
-    instagram_graph_version: str = "v23.0"
     trends_mock_mode: bool = True
     credential_backend: str = "keyring"
 
@@ -109,8 +105,6 @@ class Settings(BaseSettings):
         "youtube_client_secret",
         "tiktok_client_key",
         "tiktok_client_secret",
-        "instagram_app_id",
-        "instagram_app_secret",
         mode="before",
     )
     @classmethod

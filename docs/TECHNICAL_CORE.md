@@ -22,7 +22,7 @@ Project/media lifecycle and ownership evidence: [PHASE4_REPORT.md](PHASE4_REPORT
 | AI/ideas | `ai.py`, `content_pipeline.py` | Deterministic mock, real structured-output OpenAI adapter, persisted suggestions; real AI quality unverified. |
 | Trends/rights | `trends.py`, `copyright.py` | YouTube metadata/search/snapshots/score and heuristic risk labels; no semantic watching or determination of reuse rights. |
 | Accounts/secrets | `accounts.py`, `credentials.py`, YouTube/social OAuth services | YouTube PKCE/state, channel selection and OS-keyring persistence verified live; other providers and distributed-secret design unverified. |
-| Direct publishing | `direct_publishing.py`, tasks and publish/account GUI | YouTube private upload/final processing/privacy verified live; TikTok/Instagram remain contract-tested only. |
+| Direct publishing | `direct_publishing.py`, tasks and publish/account GUI | YouTube private upload/final processing/privacy verified live; TikTok remains contract-tested only. Only these two providers are supported. |
 | Scheduler | `scheduler.py`, `scheduler_runner.py`, calendar | Persistent scheduled records and claims; uncertain-state retry, restart recovery and shutdown have known gaps. |
 | Analytics | `analytics.py`, `dashboard.py`, dashboard widget | YouTube normalization/period upsert and token refresh tested with fixtures; real account sync and metric provenance UI incomplete. |
 | Engineering/distribution | CLI doctor, rotating log, `build_desktop.py` | Local onedir executable exists; installer, signing, updater and clean-machine release checks are absent. |
@@ -116,7 +116,7 @@ automatically. Operations without a provider ID require manual channel inspectio
 
 YouTube is LIVE VERIFIED for an approved six-second private synthetic upload, with
 processed/succeeded, private visibility, matching channel, status reread in a new
-process and a blocked repeat attempt. See PHASE5_REPORT.md. TikTok/Instagram and live
+process and a blocked repeat attempt. See PHASE5_REPORT.md. TikTok and live
 analytics remain unverified. No account identifiers or credentials are in committed evidence.
 
 ## Paths and retained compatibility

@@ -39,14 +39,6 @@ class PublicationResult:
     payload: dict[str, Any] | None = None
 
 
-def _json(response: httpx.Response) -> dict[str, Any]:
-    response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, dict):
-        raise PublishingError("Provider returned an invalid response")
-    return payload
-
-
 def _tiktok_json(response: httpx.Response) -> dict[str, Any]:
     payload = response.json()
     if not isinstance(payload, dict):
@@ -211,41 +203,6 @@ def _tiktok(path: Path, account_id: int, title: str, description: str,
     return PublicationResult(publish_id, "pending")
 
 
-def _instagram(path: Path, account_id: int, title: str, description: str,
-               http: httpx.Client) -> PublicationResult:
-    token = get_social_access_token(account_id, client=http)
-    with SessionLocal() as session:
-        account = session.get(ConnectedAccount, account_id)
-        ig_id = account.external_id if account else ""
-    if not ig_id:
-        raise PublishingError("Instagram account is missing")
-    base = f"https://graph.facebook.com/{settings.instagram_graph_version}"
-    caption = "\n\n".join(piece for piece in (title.strip(), description.strip()) if piece)
-    created = _json(http.post(f"{base}/{ig_id}/media", data={
-        "media_type": "REELS", "upload_type": "resumable", "caption": caption,
-    }, headers=_bearer(token)))
-    container_id = str(created.get("id") or "")
-    if not container_id:
-        raise PublishingError("Instagram did not return a media container")
-    upload_url = created.get("uri") or (
-        f"https://rupload.facebook.com/ig-api-upload/{settings.instagram_graph_version}/{container_id}"
-    )
-    _approved_upload_url(str(upload_url), "facebook.com")
-    try:
-        with path.open("rb") as source:
-            uploaded = http.post(str(upload_url), content=source, headers={
-                "Authorization": f"OAuth {token}", "offset": "0",
-                "file_size": str(path.stat().st_size),
-                "Content-Length": str(path.stat().st_size),
-                "Content-Type": "video/mp4",
-            })
-        _json(uploaded)
-    except (httpx.HTTPError, OSError) as exc:
-        raise PublicationUncertain("Instagram upload status is uncertain; do not resend automatically",
-                                   container_id) from exc
-    return PublicationResult(container_id, "pending", payload={"instagram_container_id": container_id})
-
-
 def publish_direct(account_id: int, video_path: str | Path, title: str,
                    description: str, options: dict[str, Any] | None = None,
                    *, client: httpx.Client | None = None, progress=None, checkpoint=None) -> PublicationResult:
@@ -262,8 +219,6 @@ def publish_direct(account_id: int, video_path: str | Path, title: str,
             return _youtube(path, account_id, title, description, options or {}, http, progress, checkpoint)
         if provider == "tiktok":
             return _tiktok(path, account_id, title, description, options or {}, http)
-        if provider == "instagram":
-            return _instagram(path, account_id, title, description, http)
         raise PublishingError(f"Unsupported direct publishing provider: {provider}")
     if client is not None:
         return publish(client)
@@ -307,42 +262,6 @@ def check_direct_status(account_id: int, provider: str, external_id: str,
                 raise PublishingError(f"TikTok publication failed: {data.get('fail_reason', 'unknown reason')}")
             return PublicationResult(external_id,
                                      "published" if status == "PUBLISH_COMPLETE" else "pending")
-        if provider == "instagram":
-            token = get_social_access_token(account_id, client=http)
-            base = f"https://graph.facebook.com/{settings.instagram_graph_version}"
-            data = _json(http.get(f"{base}/{external_id}",
-                params={"fields": "status_code"}, headers=_bearer(token)))
-            status = str(data.get("status_code") or "")
-            if status in {"ERROR", "EXPIRED"}:
-                raise PublishingError(f"Instagram media processing failed: {status}")
-            if status not in {"FINISHED", "PUBLISHED"}:
-                return PublicationResult(external_id, "pending")
-            if status == "PUBLISHED":
-                return PublicationResult(external_id, "published")
-            with SessionLocal() as session:
-                account = session.get(ConnectedAccount, account_id)
-                ig_id = account.external_id if account else ""
-            try:
-                published = _json(http.post(f"{base}/{ig_id}/media_publish",
-                    data={"creation_id": external_id}, headers=_bearer(token)))
-            except httpx.HTTPError as exc:
-                raise PublicationUncertain(
-                    "Instagram publish response is uncertain; inspect the account before retrying",
-                    external_id,
-                ) from exc
-            media_id = str(published.get("id") or "")
-            if not media_id:
-                raise PublicationUncertain("Instagram publish status is uncertain", external_id)
-            permalink = None
-            try:
-                details = _json(http.get(f"{base}/{media_id}",
-                    params={"fields": "permalink"}, headers=_bearer(token)))
-                candidate = str(details.get("permalink") or "")
-                if candidate.startswith("https://www.instagram.com/"):
-                    permalink = candidate
-            except (httpx.HTTPError, ValueError):
-                pass
-            return PublicationResult(media_id, "published", permalink)
         raise PublishingError(f"Unsupported provider: {provider}")
     if client is not None:
         return check(client)

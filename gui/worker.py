@@ -233,9 +233,6 @@ class AccountConnectWorker(QThread):
             elif self.provider == "tiktok":
                 from app.services.social_oauth import connect_tiktok
                 ids = [connect_tiktok()]
-            elif self.provider == "instagram":
-                from app.services.social_oauth import connect_instagram
-                ids = connect_instagram()
             else:
                 raise ValueError("Unsupported account provider")
             self.succeeded.emit(self.provider, ids)

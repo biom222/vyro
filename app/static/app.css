@@ -101,7 +101,6 @@ h1 { max-width: 570px; margin: .8rem 0 1.3rem; font-size: clamp(3.1rem, 6vw, 5.8
 .platform-option:has(input:checked) { border-color: var(--violet); background: rgba(118, 87, 255, .055); box-shadow: inset 0 0 0 1px var(--violet); }
 .platform-symbol { display: grid; place-items: center; width: 38px; height: 38px; margin-bottom: .55rem; color: white; background: var(--ink); border-radius: 11px; font-weight: 800; }
 .youtube .platform-symbol { background: #ff3d38; }
-.instagram .platform-symbol { background: linear-gradient(135deg, #7657ff, #ef3f75, #ffb643); }
 .platform-option > span:not(.platform-symbol) { font-size: .8rem; font-weight: 720; }
 .platform-option i { color: var(--muted); font-size: .67rem; font-style: normal; }
 .publish-results { margin-top: 1rem; }

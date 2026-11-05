@@ -110,3 +110,15 @@
   and matching pinned exports. Broader operation state machine remains Phase 8.
 - Keep live evidence separate from mock contracts. One neutral private test was
   explicitly approved and verified; no private account IDs/tokens are committed.
+
+## 2026-11-05 - Remove Instagram from product scope
+
+- User explicitly removed Instagram. Delete its OAuth, token handling, upload/status
+  adapter, service icon/menu/settings, environment fields and legacy web/mock options.
+  YouTube and TikTok are the only supported account/publication providers.
+- Retain existing database/account/post rows and project drafts. Filter unsupported
+  accounts, ignore saved active selections and clear them when restoring drafts.
+  Reject manual scheduling/publication and skip old unsupported scheduled posts.
+  No schema migration, token-store deletion or destructive data cleanup is required.
+- Cancel Phase 7 and retain later phase numbers. Historical reports remain historical;
+  update the active roadmap and setup documentation instead of rewriting evidence.

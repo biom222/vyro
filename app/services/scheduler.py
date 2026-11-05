@@ -7,6 +7,7 @@ from typing import Callable
 from sqlalchemy import select, update
 
 from app.models import Post, SessionLocal
+from app.services.accounts import SUPPORTED_PROVIDERS
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,8 @@ def schedule_post(post_id: int, scheduled_at: datetime) -> None:
         post = session.get(Post, post_id)
         if post is None:
             raise ValueError(f"Post {post_id} does not exist")
+        if post.platform not in SUPPORTED_PROVIDERS:
+            raise ValueError("This publication provider is no longer supported")
         post.scheduled_at = scheduled_at
         post.status = "scheduled"
         post.error_message = None
@@ -42,7 +45,8 @@ def run_due_posts(
         candidates = list(
             session.scalars(
                 select(Post.id)
-                .where(Post.status == "scheduled", Post.scheduled_at <= current)
+                .where(Post.status == "scheduled", Post.scheduled_at <= current,
+                       Post.platform.in_(SUPPORTED_PROVIDERS))
                 .order_by(Post.scheduled_at.asc())
                 .limit(limit)
             ).all()

@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 from app.config import settings
 from sqlalchemy import select
 from app.models import ConnectedAccount, Post, SessionLocal, Video
-from app.services.accounts import get_active_account_id, set_active_account
+from app.services.accounts import SUPPORTED_PROVIDERS, get_active_account_id, set_active_account
 from app.services.scheduler import schedule_post
 from gui.worker import PublicationStatusWorker, PublishWorker, TikTokCreatorInfoWorker
 
@@ -156,7 +156,7 @@ class PublishWidget(QWidget):
                 with SessionLocal() as session:
                     selected = state["account_id"]
                     available = session.get(ConnectedAccount, selected) if selected else None
-                set_active_account(selected if available else None)
+                set_active_account(selected if available and available.provider in SUPPORTED_PROVIDERS else None)
             self.title_edit.setText(str(state.get("title") or ""))
             self.description_edit.setPlainText(str(state.get("description") or ""))
             self._saved_options = dict(state.get("options") or {})
@@ -216,8 +216,6 @@ class PublishWidget(QWidget):
                 self.creator_worker.error.connect(self._creator_failed)
                 self.creator_worker.finished.connect(self._creator_finished)
                 self.creator_worker.start()
-        elif provider == "instagram":
-            self.privacy_combo.addItem("Публичный Reel")
         selected_privacy = self._saved_options.get("youtube_privacy" if provider == "youtube" else "privacy_level")
         if selected_privacy:
             index = self.privacy_combo.findData(selected_privacy)

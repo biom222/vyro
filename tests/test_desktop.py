@@ -295,7 +295,7 @@ class DesktopTests(unittest.TestCase):
         with SessionLocal() as session:
             post = Post(
                 video_id=video_id,
-                platform="mock-youtube",
+                platform="youtube",
                 status="publishing",
             )
             session.add(post)
@@ -360,27 +360,78 @@ class DesktopTests(unittest.TestCase):
 
     def test_accounts_menu_checks_only_selected_account(self):
         first = upsert_account("youtube", "menu-youtube", "Menu YouTube")
-        second = upsert_account("instagram", "menu-instagram", "Menu Instagram")
+        second = upsert_account("tiktok", "menu-tiktok", "Menu TikTok")
         with SessionLocal() as session:
             session.get(ConnectedAccount, first).credential_ref = "youtube:menu"
-            session.get(ConnectedAccount, second).credential_ref = "instagram:menu"
+            session.get(ConnectedAccount, second).credential_ref = "tiktok:menu"
             session.commit()
         set_active_account(first)
         window = MainWindow()
         accounts_menu = window.accounts_menu
+        self.assertEqual([action.text() for action in accounts_menu.menu.actions() if action.menu()],
+                         ["YouTube", "TikTok"])
         youtube_menu = next(action.menu() for action in accounts_menu.menu.actions()
                             if action.text() == "YouTube")
-        instagram_menu = next(action.menu() for action in accounts_menu.menu.actions()
-                              if action.text() == "Instagram")
+        tiktok_menu = next(action.menu() for action in accounts_menu.menu.actions()
+                              if action.text() == "TikTok")
         self.assertTrue(next(action for action in youtube_menu.actions()
                              if action.text() == "Menu YouTube").isChecked())
-        self.assertFalse(next(action for action in instagram_menu.actions()
-                              if action.text() == "Menu Instagram").isChecked())
-        self.assertEqual(instagram_menu.actions()[-1].text(), "Добавить аккаунт…")
-        accounts_menu.select_account(second)
+        self.assertFalse(next(action for action in tiktok_menu.actions()
+                              if action.text() == "Menu TikTok").isChecked())
+        self.assertEqual(tiktok_menu.actions()[-1].text(), "Добавить аккаунт…")
+        with patch("gui.publish_widget.TikTokCreatorInfoWorker.start"):
+            accounts_menu.select_account(second)
         self.assertEqual(get_active_account_id(), second)
-        self.assertIn("Menu Instagram", window.publish_widget.account_label.text())
+        self.assertIn("Menu TikTok", window.publish_widget.account_label.text())
+        set_active_account(first)
         window.close()
+
+    def test_removed_provider_is_archived_and_cannot_publish_or_schedule(self):
+        from app.models import AppPreference
+        from app.services.accounts import ACTIVE_ACCOUNT_KEY, list_accounts
+        from app.publisher import get_platforms
+        with patch.object(settings, "taisly_api_key", ""), patch("httpx.Client.request") as network:
+            self.assertEqual({item["platform"] for item in get_platforms()}, {"YouTube", "TikTok"})
+            network.assert_not_called()
+        video_id = self.create_video("archived-provider.mp4")
+        with SessionLocal.begin() as session:
+            account = ConnectedAccount(provider="instagram", external_id="legacy-account",
+                                       display_name="Archived account", status="connected",
+                                       credential_ref="legacy:credential")
+            session.add(account)
+            session.flush()
+            account_id = account.id
+            post = Post(video_id=video_id, account_id=account_id, platform="instagram",
+                        status="scheduled", scheduled_at=datetime.now(timezone.utc) - timedelta(days=1))
+            session.add(post)
+            preference = session.get(AppPreference, ACTIVE_ACCOUNT_KEY)
+            if preference is None:
+                preference = AppPreference(key=ACTIVE_ACCOUNT_KEY)
+                session.add(preference)
+            preference.value_json = account_id
+            session.flush()
+            post_id = post.id
+        self.assertIsNone(get_active_account_id())
+        self.assertNotIn(account_id, [item.id for item in list_accounts()])
+        with self.assertRaises(ValueError):
+            set_active_account(account_id)
+        with patch("app.tasks.publish_direct") as publish:
+            with self.assertRaisesRegex(ValueError, "no longer supported"):
+                publish_video(post_id)
+            publish.assert_not_called()
+        with self.assertRaises(ValueError):
+            schedule_post(post_id, datetime.now(timezone.utc))
+        observed = []
+        run_due_posts(observed.append, limit=1000)
+        self.assertNotIn(post_id, observed)
+        widget = PublishWidget()
+        widget.restore_draft({"account_id": account_id, "title": "Retained draft"})
+        self.assertIsNone(get_active_account_id())
+        self.assertEqual(widget.title_edit.text(), "Retained draft")
+        widget.close()
+        with SessionLocal() as session:
+            self.assertIsNotNone(session.get(Post, post_id))
+            self.assertIsNotNone(session.get(ConnectedAccount, account_id))
 
     def test_direct_youtube_upload_uses_requested_privacy(self):
         account_id = upsert_account("youtube", "api-youtube", "API YouTube")
@@ -575,36 +626,6 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(status.status, "published")
         self.assertEqual(observed[2].headers["content-range"], "bytes 0-10/11")
 
-    def test_direct_instagram_upload_and_publish(self):
-        account_id = upsert_account("instagram", "ig-account", "API Instagram")
-        with SessionLocal() as session:
-            session.get(ConnectedAccount, account_id).credential_ref = "instagram:api"
-            session.commit()
-        path = Path(TEST_ROOT.name, "instagram-api.mp4")
-        path.write_bytes(b"small-video")
-        observed = []
-        def handler(request):
-            observed.append(request)
-            if request.url.path.endswith("/ig-account/media"):
-                return httpx.Response(200, json={
-                    "id": "container-1", "uri": "https://rupload.facebook.com/ig-api-upload/v23.0/container-1"})
-            if request.url.host == "rupload.facebook.com":
-                return httpx.Response(200, json={"success": True})
-            if request.url.path.endswith("/container-1"):
-                return httpx.Response(200, json={"status_code": "FINISHED"})
-            if request.url.path.endswith("/media_publish"):
-                return httpx.Response(200, json={"id": "media-1"})
-            return httpx.Response(404)
-        with httpx.Client(transport=httpx.MockTransport(handler)) as client, patch(
-            "app.services.direct_publishing.get_social_access_token", return_value="test-token"
-        ):
-            result = publish_direct(account_id, path, "Title", "Description", client=client)
-            status = check_direct_status(account_id, "instagram", result.external_id, client=client)
-        self.assertEqual(result.status, "pending")
-        self.assertEqual(status.external_id, "media-1")
-        self.assertEqual(status.status, "published")
-        self.assertIsNone(status.external_url)
-        self.assertEqual(observed[1].content, b"small-video")
 
     def test_tiktok_oauth_connects_and_stores_account_tokens(self):
         from app.services.social_oauth import connect_tiktok
@@ -629,27 +650,6 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(json.loads(store.get(account.credential_ref))["refresh_token"], "refresh")
         self.assertEqual(get_active_account_id(), account_id)
 
-    def test_instagram_oauth_connects_linked_professional_account(self):
-        from app.services.social_oauth import connect_instagram
-        store = MemoryCredentialStore()
-        def handler(request):
-            if request.url.path.endswith("/me/accounts"):
-                return httpx.Response(200, json={"data": [{
-                    "id": "page-1", "access_token": "page-token",
-                    "instagram_business_account": {"id": "ig-oauth", "username": "creator"}}]})
-            return httpx.Response(200, json={"access_token": "user-token"})
-        with httpx.Client(transport=httpx.MockTransport(handler)) as client, patch.object(
-            settings, "instagram_app_id", "app-id"
-        ), patch.object(settings, "instagram_app_secret", "secret"), patch(
-            "app.services.social_oauth._loopback_code", return_value="auth-code"
-        ):
-            account_ids = connect_instagram(client=client, store=store)
-        self.assertEqual(len(account_ids), 1)
-        with SessionLocal() as session:
-            account = session.get(ConnectedAccount, account_ids[0])
-            self.assertEqual(account.provider, "instagram")
-            self.assertEqual(account.username, "creator")
-            self.assertEqual(json.loads(store.get(account.credential_ref))["access_token"], "page-token")
 
     def test_database_is_at_alembic_head(self):
         self.assertEqual(current_revision(), head_revision())
@@ -783,8 +783,8 @@ class DesktopTests(unittest.TestCase):
     def test_scheduler_returns_due_posts_only(self):
         video_id = self.create_video("scheduled.mp4")
         with SessionLocal() as session:
-            due = Post(video_id=video_id, platform="mock-youtube")
-            future = Post(video_id=video_id, platform="mock-youtube")
+            due = Post(video_id=video_id, platform="youtube")
+            future = Post(video_id=video_id, platform="youtube")
             session.add_all([due, future])
             session.commit()
             due_id, future_id = due.id, future.id
@@ -814,8 +814,8 @@ class DesktopTests(unittest.TestCase):
     def test_scheduler_claims_posts_and_continues_after_failure(self):
         video_id = self.create_video("scheduler-failure.mp4")
         with SessionLocal() as session:
-            first = Post(video_id=video_id, platform="mock-youtube")
-            second = Post(video_id=video_id, platform="mock-youtube")
+            first = Post(video_id=video_id, platform="youtube")
+            second = Post(video_id=video_id, platform="youtube")
             session.add_all([first, second])
             session.commit()
             first_id, second_id = first.id, second.id

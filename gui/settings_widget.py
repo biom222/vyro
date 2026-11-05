@@ -44,7 +44,7 @@ class SettingsWidget(QWidget):
         row.addWidget(self.account_combo, 1)
         account_layout.addLayout(row)
         oauth_hint = QLabel(
-            "Добавление и выбор аккаунтов YouTube, TikTok и Instagram — в верхнем меню «Аккаунты». "
+            "Добавление и выбор аккаунтов YouTube и TikTok — в верхнем меню «Аккаунты». "
             "OAuth-ключи задаются в .env; токены сохраняются в системном хранилище."
         )
         oauth_hint.setObjectName("muted")
@@ -63,7 +63,7 @@ class SettingsWidget(QWidget):
             "Тренды:", QLabel("mock" if settings.trends_mock_mode else "YouTube API")
         )
         config.addRow(
-            "Публикация:", QLabel("Прямые API YouTube, TikTok и Instagram")
+            "Публикация:", QLabel("Прямые API YouTube и TikTok")
         )
         config.addRow("База данных:", QLabel(settings.database_url))
         env_label = QLabel(str(ENV_FILE))

@@ -6,6 +6,7 @@ from app.models import AppPreference, ConnectedAccount, SessionLocal
 
 
 ACTIVE_ACCOUNT_KEY = "active_account_id"
+SUPPORTED_PROVIDERS = ("youtube", "tiktok")
 
 
 def upsert_account(
@@ -18,6 +19,8 @@ def upsert_account(
     normalized_provider = provider.strip().lower()
     if not normalized_provider or not external_id.strip():
         raise ValueError("Provider and external account ID are required")
+    if normalized_provider not in SUPPORTED_PROVIDERS:
+        raise ValueError("Unsupported account provider")
     with SessionLocal() as session:
         account = session.scalar(
             select(ConnectedAccount).where(
@@ -42,8 +45,10 @@ def upsert_account(
 
 def set_active_account(account_id: int | None) -> None:
     with SessionLocal() as session:
-        if account_id is not None and session.get(ConnectedAccount, account_id) is None:
-            raise ValueError(f"Connected account {account_id} does not exist")
+        if account_id is not None:
+            account = session.get(ConnectedAccount, account_id)
+            if account is None or account.provider not in SUPPORTED_PROVIDERS:
+                raise ValueError("Select a supported connected account")
         preference = session.get(AppPreference, ACTIVE_ACCOUNT_KEY)
         if preference is None:
             preference = AppPreference(key=ACTIVE_ACCOUNT_KEY)
@@ -57,14 +62,15 @@ def get_active_account_id() -> int | None:
         preference = session.get(AppPreference, ACTIVE_ACCOUNT_KEY)
         if preference is None or preference.value_json is None:
             return None
-        return int(preference.value_json)
+        account = session.get(ConnectedAccount, int(preference.value_json))
+        return account.id if account and account.provider in SUPPORTED_PROVIDERS else None
 
 
 def list_accounts() -> list[ConnectedAccount]:
     with SessionLocal() as session:
         accounts = list(
             session.scalars(
-                select(ConnectedAccount).order_by(
+                select(ConnectedAccount).where(ConnectedAccount.provider.in_(SUPPORTED_PROVIDERS)).order_by(
                     ConnectedAccount.provider.asc(), ConnectedAccount.display_name.asc()
                 )
             ).all()

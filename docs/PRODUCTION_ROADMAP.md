@@ -152,15 +152,12 @@ external provider block. Respect the provider's current capabilities and approva
 Gate: live evidence or an explicit external credentials/approval blocker; local contract
 tests stay mandatory and distinct from live results.
 
-## Phase 7 - Live Instagram E2E
+## Phase 7 - Cancelled
 
-- Use the existing official Meta adapter; diagnose professional-account/Page/permission
-  requirements before a user commits to upload.
-- Verify `connect -> capabilities -> selection -> upload -> container/status -> publish
-  -> final result`, storing provider IDs and handling token lifecycle/errors/restart.
-
-Gate: live evidence or explicit provider/credentials block; useful capability errors
-must precede unsupported workflows.
+Instagram was removed from the product at the user's request on 2026-11-05.
+Its account connection, publishing adapter, UI and configuration were removed.
+Historical records are retained but inactive. Keep phase numbers stable: after Phase 6,
+continue with Phase 8; do not implement another Instagram integration.
 
 ## Phase 8 - Publication engine and scheduler
 
@@ -264,7 +261,7 @@ Gate: successful, missing/offline/corrupt update and busy-operation tests.
   music/subtitles/layers/titles; save/restart/reopen/export; external MP4 playback;
   YouTube connect/publish/restart/status; schedule/execute; disconnect network and
   interrupt/restart unfinished work; diagnostics/update/uninstall/reinstall without loss.
-- Run analogous live TikTok/Instagram cases when production credentials are available.
+- Run analogous live TikTok cases when production credentials are available.
 
 Gate: completed automated and manual release matrix with actual evidence, remaining
 provider approvals and any known limits explicitly signed off.
@@ -275,7 +272,7 @@ Call the product `vyro 1.0 production-ready` only after proven project safety, r
 export/preview agreement, safe migrations, no known critical data-loss bug, terminal-free
 clean Windows installation, safe secrets, responsive GUI/useful errors, live YouTube E2E,
 scheduler restart recovery, duplicate prevention, passing regressions and an honest manual
-release checklist. TikTok/Instagram may remain provider-approval-pending only when the
+release checklist. TikTok may remain provider-approval-pending only when the
 application handles that state correctly and labels it honestly.
 
 Legacy web assets, Taisly transport/settings, duplicate workers and compatibility code

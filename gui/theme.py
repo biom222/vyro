@@ -70,10 +70,6 @@ def service_icon(provider: str) -> QIcon:
         painter.drawLine(11, 2, 11, 12)
         painter.drawLine(11, 3, 15, 6)
         painter.drawEllipse(QRectF(4, 11, 7, 5))
-    elif provider == "instagram":
-        painter.drawRoundedRect(QRectF(2, 2, 14, 14), 2, 2)
-        painter.drawEllipse(QRectF(6, 6, 6, 6))
-        painter.drawPoint(13, 5)
     painter.end()
     return QIcon(pixmap)
 

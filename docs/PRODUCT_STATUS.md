@@ -1,5 +1,18 @@
 # Product status and Phase 0 baseline
 
+## Scope change: Instagram removed
+
+On 2026-11-05 the user removed Instagram from the product. Only YouTube and TikTok
+remain selectable/connectable publication providers. Instagram OAuth/upload/status,
+GUI controls and configuration were removed. Existing account/post records and project
+drafts remain intact, but cannot trigger publication or scheduling; unsupported saved
+account selections resolve to no account. Phase 7 is cancelled, with later phase numbers
+unchanged. Earlier inventory/reports below describe the historical implementation.
+Validation: 70 automated tests pass, including a legacy removed-provider account,
+saved draft, retained history and a due scheduled post that must never be dispatched.
+No schema migration or deletion of user media/history is required.
+The local Windows EXE was rebuilt and its isolated offscreen startup self-test passed.
+
 ## Current update: Phase 5
 
 YouTube is LIVE VERIFIED for one user-approved private six-second synthetic upload

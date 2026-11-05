@@ -10,6 +10,7 @@ from sqlalchemy import update, select
 from app.config import settings
 from app.media_process import RenderCancelled
 from app.models import ConnectedAccount, Post, SessionLocal, Video
+from app.services.accounts import SUPPORTED_PROVIDERS
 from app.services.direct_publishing import (
     PublicationUncertain,
     check_direct_status,
@@ -108,6 +109,8 @@ def _claim_post_for_publication(post_id: int) -> None:
         if session.bind.dialect.name == "sqlite":
             session.connection().exec_driver_sql("BEGIN IMMEDIATE")
         post = session.get(Post, post_id)
+        if post and post.platform not in SUPPORTED_PROVIDERS:
+            raise ValueError("This publication provider is no longer supported")
         if post and post.platform == "youtube":
             payload = post.payload_json or {}
             if post.external_id or payload.get("youtube_upload_attempted"):

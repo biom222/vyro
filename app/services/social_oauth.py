@@ -1,4 +1,4 @@
-"""Direct TikTok and Instagram account authorization for the desktop app."""
+"""Direct TikTok account authorization for the desktop app."""
 
 from __future__ import annotations
 
@@ -178,71 +178,15 @@ def connect_tiktok(*, open_browser: bool = True, client: httpx.Client | None = N
         return complete(http)
 
 
-def connect_instagram(*, open_browser: bool = True, client: httpx.Client | None = None,
-                      store: CredentialStore | None = None) -> list[int]:
-    if not settings.instagram_app_id or not settings.instagram_app_secret:
-        raise ValueError("Set INSTAGRAM_APP_ID and INSTAGRAM_APP_SECRET in .env")
-    state = secrets.token_urlsafe(32)
-    base = f"https://graph.facebook.com/{settings.instagram_graph_version}"
-    url = f"https://www.facebook.com/{settings.instagram_graph_version}/dialog/oauth?" + urlencode({
-        "client_id": settings.instagram_app_id,
-        "redirect_uri": settings.instagram_redirect_uri,
-        "state": state,
-        "response_type": "code",
-        "scope": "pages_show_list,pages_read_engagement,instagram_basic,instagram_content_publish",
-    })
-    code = _loopback_code(settings.instagram_redirect_uri, url, state,
-                          open_browser=open_browser)
-    def complete(http: httpx.Client) -> list[int]:
-        short = _json(http.get(f"{base}/oauth/access_token", params={
-            "client_id": settings.instagram_app_id,
-            "client_secret": settings.instagram_app_secret,
-            "redirect_uri": settings.instagram_redirect_uri,
-            "code": code,
-        }))
-        long_lived = _json(http.get(f"{base}/oauth/access_token", params={
-            "grant_type": "fb_exchange_token",
-            "client_id": settings.instagram_app_id,
-            "client_secret": settings.instagram_app_secret,
-            "fb_exchange_token": short["access_token"],
-        }))
-        pages = _json(http.get(f"{base}/me/accounts", params={
-            "fields": "id,name,access_token,instagram_business_account{id,username,name,profile_picture_url}",
-            "limit": 100,
-        }, headers={"Authorization": f"Bearer {long_lived['access_token']}"}))
-        ids: list[int] = []
-        for page in pages.get("data") or []:
-            instagram = page.get("instagram_business_account") or {}
-            ig_id = str(instagram.get("id") or "")
-            page_token = str(page.get("access_token") or "")
-            if not ig_id or not page_token:
-                continue
-            account_id = upsert_account("instagram", ig_id,
-                str(instagram.get("name") or instagram.get("username") or ig_id),
-                username=str(instagram.get("username") or ""),
-                avatar_url=instagram.get("profile_picture_url"))
-            _save_bundle(account_id, "instagram", {
-                "access_token": page_token,
-                "page_id": str(page.get("id") or ""),
-            }, store)
-            ids.append(account_id)
-        if not ids:
-            raise ValueError("No professional Instagram account linked to an accessible Facebook Page")
-        set_active_account(ids[0])
-        return ids
-    if client is not None:
-        return complete(client)
-    with httpx.Client(timeout=30) as http:
-        return complete(http)
 
 
 def get_social_access_token(account_id: int, *, store: CredentialStore | None = None,
                             client: httpx.Client | None = None) -> str:
     with SessionLocal() as session:
         account = session.get(ConnectedAccount, account_id)
-        if account is None or account.provider not in {"tiktok", "instagram"} or not account.credential_ref:
+        if account is None or account.provider != "tiktok" or not account.credential_ref:
             raise ValueError("Account is not connected for direct publishing")
-        provider, reference = account.provider, account.credential_ref
+        reference = account.credential_ref
     credential_store = store or get_credential_store()
     raw = credential_store.get(reference)
     if not raw:
@@ -251,8 +195,6 @@ def get_social_access_token(account_id: int, *, store: CredentialStore | None = 
     token = str(bundle.get("access_token") or "")
     if not token:
         raise ValueError("Stored account credential has no access token")
-    if provider == "instagram":
-        return token
     expires_at = datetime.fromisoformat(bundle["expires_at"])
     if expires_at > datetime.now(timezone.utc) + timedelta(minutes=2):
         return token

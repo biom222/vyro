@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.services.accounts import SUPPORTED_PROVIDERS
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,6 @@ def get_platforms() -> list[dict[str, Any]]:
         return [
             {"id": "mock-youtube", "platform": "YouTube", "displayName": "Mock YouTube"},
             {"id": "mock-tiktok", "platform": "TikTok", "displayName": "Mock TikTok"},
-            {"id": "mock-instagram", "platform": "Instagram", "displayName": "Mock Instagram"},
         ]
 
     with httpx.Client(timeout=30.0) as client:
@@ -44,7 +44,8 @@ def get_platforms() -> list[dict[str, Any]]:
         raise PublishingError(f"Could not load Taisly platforms: {exc}") from exc
     if not payload.get("success") or not isinstance(payload.get("data"), list):
         raise PublishingError("Taisly returned an invalid platforms response")
-    return payload["data"]
+    return [platform for platform in payload["data"]
+            if str(platform.get("platform") or "").strip().lower() in SUPPORTED_PROVIDERS]
 
 
 def _resolve_platform_id(requested_platform: str, platforms: list[dict[str, Any]]) -> str:
