@@ -67,14 +67,12 @@ def render_video(
     params: dict[str, Any],
     progress_callback: Callable[[int], None] | None = None,
 ) -> tuple[str, float]:
-    old_output: str | None = None
     with SessionLocal() as session:
         video = session.get(Video, video_id)
         if video is None:
             raise ValueError(f"Video {video_id} does not exist")
         video.status = "processing"
         video.error_message = None
-        old_output = video.output_path
         session.commit()
 
     try:
@@ -87,11 +85,8 @@ def render_video(
                 video.status = "ready"
                 video.error_message = None
                 session.commit()
-        if old_output and old_output != output_path:
-            try:
-                Path(old_output).unlink(missing_ok=True)
-            except OSError:
-                logger.warning("Could not remove previous output %s", old_output)
+        # Exports may be shared by project copies or pinned to a pending publication.
+        # Keep them until an explicit, reference-aware cleanup operation is requested.
         return output_path, duration
     except Exception as exc:
         logger.exception("Rendering failed for video %s", video_id)
@@ -142,12 +137,15 @@ def publish_video(post_id: int) -> None:
             if video is None or video.status != "ready" or not video.output_path:
                 raise ValueError("Video is not ready for publishing")
 
-            publish_duration = video.output_duration or probe_duration(video.output_path)
+            payload = post.payload_json or {}
+            media_path = payload.get("media_path") or video.output_path
+            if not Path(media_path).is_file():
+                raise ValueError("The selected publication export is missing; render and select it again")
+            publish_duration = payload.get("media_duration") or video.output_duration or probe_duration(media_path)
             if not 3 <= publish_duration <= settings.max_video_duration:
                 raise ValueError("Video duration is outside the supported editor range")
 
-            values = (account.id, video.output_path, post.title, post.description,
-                      post.payload_json or {})
+            values = (account.id, media_path, post.title, post.description, payload)
 
         result = publish_direct(*values)
         with SessionLocal() as session:

@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    event,
     inspect,
     text,
 )
@@ -48,6 +49,7 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    draft_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     thumbnail_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -59,6 +61,16 @@ class Project(Base):
         back_populates="project", cascade="all, delete-orphan"
     )
     ideas: Mapped[list[ContentIdea]] = relationship(back_populates="project")
+
+
+class ProjectRevision(Base):
+    __tablename__ = "project_revisions"
+
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    state: Mapped[dict] = mapped_column(JSON)
+    checksum: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class Video(Base):
@@ -327,6 +339,12 @@ class ContentIdea(Base):
 
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, pool_pre_ping=True, connect_args=connect_args)
+if settings.database_url.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def _sqlite_connection(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+        dbapi_connection.execute("PRAGMA busy_timeout=5000")
+
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
