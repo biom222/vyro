@@ -46,6 +46,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(settings.app_name)
         self.resize(1380, 880)
         self.setMinimumSize(1040, 700)
+        self._media_busy = False
 
         self.page_indexes: dict[str, int] = {}
         self.pages = QStackedWidget()
@@ -160,6 +161,9 @@ class MainWindow(QMainWindow):
                                    self.edit_widget.start_render, "Ctrl+E")
         self.save_action = action(file_menu, "Сохранить копию", QStyle.StandardPixmap.SP_DialogSaveButton,
                                  self.edit_widget.save_as, "Ctrl+Alt+S")
+        self.cancel_render_action = action(edit_menu, "Отменить обработку", QStyle.StandardPixmap.SP_MediaStop,
+                                           self.edit_widget.cancel_render, "Ctrl+.")
+        self.cancel_render_action.setVisible(False)
         file_menu.addSeparator()
         exit_action = file_menu.addAction("Выход")
         exit_action.triggered.connect(self.close)
@@ -201,13 +205,21 @@ class MainWindow(QMainWindow):
         self.editor_workspace.video_ready.connect(self._sync_actions)
         self.edit_widget.busy_changed.connect(self._sync_actions)
         self.edit_widget.render_completed.connect(self._sync_actions)
+        self.editor_workspace.processing_changed.connect(self._media_busy_changed)
         self._sync_actions()
 
     def _sync_actions(self, *args) -> None:
-        self.save_project_action.setEnabled(self.editor_workspace.project_id is not None and not self.edit_widget.is_busy())
+        busy = self._media_busy or self.edit_widget.is_busy()
+        self.save_project_action.setEnabled(self.editor_workspace.project_id is not None and not busy)
         self.save_project_as_action.setEnabled(self.save_project_action.isEnabled())
-        self.export_action.setEnabled(self.edit_widget.video_id is not None and not self.edit_widget.is_busy())
-        self.save_action.setEnabled(bool(self.edit_widget.output_path) and not self.edit_widget.is_busy())
+        self.export_action.setEnabled(self.edit_widget.video_id is not None and not busy)
+        self.save_action.setEnabled(bool(self.edit_widget.output_path) and not busy)
+        self.cancel_render_action.setVisible(busy)
+        self.cancel_render_action.setEnabled(busy)
+
+    def _media_busy_changed(self, busy: bool) -> None:
+        self._media_busy = busy
+        self._sync_actions()
 
     def _import_video(self) -> None:
         self.navigate("editor")

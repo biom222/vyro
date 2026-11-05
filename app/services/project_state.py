@@ -95,6 +95,10 @@ def _validate(session, project_id: int, state: dict) -> tuple[str, ...]:
     if state.get("transition", "cut") not in {"cut", "dissolve"}:
         raise ProjectStateError("Неизвестный тип перехода в проекте.")
     editor = state.get("editor", {})
+    if str(editor.get("fps", "30")) not in {"source", "24", "25", "30", "50", "60"}:
+        raise ProjectStateError("Неподдерживаемая частота кадров проекта.")
+    if editor.get("quality", "standard") not in {"standard", "high"}:
+        raise ProjectStateError("Неподдерживаемое качество экспорта.")
     number(editor.get("crop_position", 0.5), 0, 1)
     number(editor.get("font_size", 64), 1, 400)
     for layer in state.get("title_layers", []) + state.get("video_layers", []):

@@ -5,9 +5,11 @@ import hashlib
 import logging
 import math
 import shutil
-import subprocess
 import tempfile
 import uuid
+from fractions import Fraction
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,31 +18,38 @@ from sqlalchemy import select
 from app.config import settings
 from app.models import SessionLocal, Transcript, Video
 from app.services.subtitles import SubtitleCue, save_subtitles
+from app.media_process import VideoProcessingError, RenderControl, execute, media_operation, current_control
 
 logger = logging.getLogger(__name__)
+_crf: ContextVar[str | None] = ContextVar("render_crf", default=None)
 
 
-class VideoProcessingError(RuntimeError):
-    """Raised when FFmpeg or FFprobe cannot process a video."""
+def _render_operation(function):
+    @wraps(function)
+    def wrapped(video_id, params, progress_callback=None, **kwargs):
+        token = _crf.set("30" if kwargs.get("preview") else quality_crf(params))
+        try:
+            with media_operation(current_control() or RenderControl()):
+                return function(video_id, params, progress_callback, **kwargs)
+        finally:
+            _crf.reset(token)
+    return wrapped
 
 
-def _run(command: list[str]) -> None:
+def _run(command: list[str], duration: float | None = None, progress=None, cwd=None) -> None:
     logger.info("Running video command: %s", " ".join(command[:4]) + " ...")
+    invocation = command[:]
+    if _crf.get() is not None and "-crf" in invocation:
+        invocation[invocation.index("-crf") + 1] = _crf.get()
+    callback = None
+    if progress and duration and duration > 0:
+        invocation[1:1] = ["-nostdin", "-progress", "pipe:1", "-nostats"]
+        callback = lambda seconds: progress(min(99, max(0, round(seconds / duration * 100))))
     try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
-    except FileNotFoundError as exc:
-        raise VideoProcessingError(f"Required executable is missing: {command[0]}") from exc
-
-    if completed.returncode != 0:
-        details = completed.stderr.strip().splitlines()
-        message = details[-1] if details else "Unknown FFmpeg error"
-        raise VideoProcessingError(message)
+        execute(invocation, progress=callback, cwd=cwd)
+    except Exception:
+        Path(command[-1]).unlink(missing_ok=True)
+        raise
 
 
 def probe_video_metadata(input_path: str | Path) -> tuple[float, int, int]:
@@ -56,22 +65,11 @@ def probe_video_metadata(input_path: str | Path) -> tuple[float, int, int]:
         "json",
         str(input_path),
     ]
+    output = execute(command, timeout=30)
     try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
-    except FileNotFoundError as exc:
-        raise VideoProcessingError("ffprobe is not installed") from exc
-
-    if completed.returncode != 0:
-        raise VideoProcessingError(completed.stderr.strip() or "Could not inspect video")
-
-    try:
-        payload = json.loads(completed.stdout)
+        payload = json.loads(output)
+        if not payload.get("streams"):
+            raise VideoProcessingError("This file has no video stream. Select a video file.")
         duration = float(payload["format"]["duration"])
         stream = payload["streams"][0]
         width = int(stream["width"])
@@ -79,9 +77,33 @@ def probe_video_metadata(input_path: str | Path) -> tuple[float, int, int]:
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise VideoProcessingError("Could not read video metadata") from exc
 
-    if duration <= 0 or width <= 0 or height <= 0:
+    if not math.isfinite(duration) or duration <= 0 or width <= 0 or height <= 0:
         raise VideoProcessingError("Video metadata contains invalid values")
     return duration, width, height
+
+
+def output_fps(params: dict, source: Path) -> str:
+    value = str(params.get("fps", "30"))
+    if value == "source":
+        payload = json.loads(execute([settings.ffprobe_binary, "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=avg_frame_rate", "-of", "json", str(source)], timeout=30))
+        try:
+            rate = Fraction(payload["streams"][0]["avg_frame_rate"])
+            if not 1 <= rate <= 120:
+                raise ValueError()
+            return str(rate)
+        except (KeyError, IndexError, TypeError, ValueError, ZeroDivisionError) as exc:
+            raise VideoProcessingError("Could not determine source FPS; select a fixed frame rate") from exc
+    if value not in {"24", "25", "30", "50", "60"}:
+        raise VideoProcessingError("Unsupported export frame rate")
+    return value
+
+
+def quality_crf(params: dict) -> str:
+    quality = params.get("quality", "standard")
+    if quality not in {"standard", "high"}:
+        raise VideoProcessingError("Unsupported export quality")
+    return "18" if quality == "high" else "23"
 
 
 def probe_duration(input_path: str | Path) -> float:
@@ -125,8 +147,9 @@ def trim_video(
     output_path: str | Path,
     start: float,
     end: float,
+    fps: str | None = None,
 ) -> Path:
-    if start < 0 or end <= start:
+    if not all(map(math.isfinite, (start, end))) or start < 0 or end <= start:
         raise ValueError("Trim range must satisfy 0 <= start < end")
 
     command = [
@@ -145,6 +168,8 @@ def trim_video(
         "0:v:0",
         "-map",
         "0:a?",
+        "-vf",
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
         "-c:v",
         "libx264",
         "-preset",
@@ -161,6 +186,8 @@ def trim_video(
         "+faststart",
         str(output_path),
     ]
+    if fps:
+        command[command.index("-vf") + 1] += f",fps={fps}"
     _run(command)
     return Path(output_path)
 
@@ -204,6 +231,7 @@ def add_text(
     position: str = "bottom",
     font_size: int = 64,
     font_color: str = "white",
+    render_scale: float = 1.0,
 ) -> Path:
     if not text.strip():
         shutil.copy2(input_path, output_path)
@@ -220,18 +248,18 @@ def add_text(
         }
         colors = {"white", "yellow", "#69c0ff"}
         y_position = positions.get(position, positions["bottom"])
-        safe_size = min(max(int(font_size), 24), 120)
+        safe_size = max(1, round(min(max(int(font_size), 24), 120) * render_scale))
         safe_color = font_color if font_color in colors else "white"
         video_filter = (
             f"drawtext=fontfile='{_filter_path(_font_path())}':"
-            f"textfile='{_filter_path(text_file)}':reload=0:"
-            f"fontcolor={safe_color}:fontsize={safe_size}:line_spacing=12:"
-            "borderw=4:bordercolor=black@0.85:"
+            f"textfile='{text_file.name}':reload=0:"
+            f"fontcolor={safe_color}:fontsize={safe_size}:line_spacing={round(12*render_scale)}:"
+            f"borderw={max(1, round(4*render_scale))}:bordercolor=black@0.85:"
             f"x=(w-text_w)/2:y={y_position}:fix_bounds=1"
         )
-        command = _encode_command(input_path, output_path)
+        command = _encode_command(Path(input_path).resolve(), Path(output_path).resolve())
         command[-1:-1] = ["-vf", video_filter]
-        _run(command)
+        _run(command, cwd=output.parent.resolve())
     finally:
         text_file.unlink(missing_ok=True)
     return output
@@ -307,18 +335,18 @@ def render_title_layers(input_path: str | Path, output_path: str | Path,
             x = _keyframe_expression(keyframes, "x")
             y = _keyframe_expression(keyframes, "y")
             alpha = _keyframe_expression(keyframes, "opacity")
-            size = max(12, round(layer["font_size"] * (0.5 if preview else 1)))
+            size = max(1, round(layer["font_size"] * (0.5 if preview else 1)))
             filters.append(
                 f"drawtext=fontfile='{_filter_path(_font_path())}':"
-                f"textfile='{_filter_path(text_file)}':reload=0:"
+                f"textfile='{text_file.name}':reload=0:"
                 f"fontcolor={layer['color']}:fontsize={size}:"
-                "borderw=3:bordercolor=black@0.85:"
+                f"borderw={1.5 if preview else 3}:bordercolor=black@0.85:"
                 f"x='({x})*w-text_w/2':y='({y})*h-text_h/2':alpha='{alpha}':"
                 f"enable='between(t,{layer['start']:.4f},{layer['end']:.4f})'"
             )
-        command = _encode_command(input_path, output_path)
+        command = _encode_command(Path(input_path).resolve(), Path(output_path).resolve())
         command[-1:-1] = ["-vf", ",".join(filters)]
-        _run(command)
+        _run(command, cwd=temp_dir)
     return Path(output_path)
 
 
@@ -413,27 +441,21 @@ def burn_subtitles(
         "FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,"
         "OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=110"
     )
-    video_filter = (
-        f"subtitles=filename='{_filter_path(subtitles)}':force_style='{style}'"
-    )
-    command = _encode_command(input_path, output_path)
-    command[-1:-1] = ["-vf", video_filter]
-    _run(command)
+    # Filter syntax has a second escaping layer. Use a local ASCII filename so that
+    # apostrophes/commas/colons in application and user paths never enter the filter.
+    with tempfile.TemporaryDirectory(prefix="vyro-subtitles-") as directory:
+        local = Path(directory) / ("captions" + subtitles.suffix.lower())
+        shutil.copy2(subtitles, local)
+        video_filter = f"subtitles=filename='{local.name}':force_style='{style}'"
+        command = _encode_command(Path(input_path).resolve(), Path(output_path).resolve())
+        command[-1:-1] = ["-vf", video_filter]
+        _run(command, cwd=directory)
     return Path(output_path)
 
 
 def _has_audio(path: Path) -> bool:
-    try:
-        result = subprocess.run(
-            [settings.ffprobe_binary, "-v", "error", "-select_streams", "a:0",
-             "-show_entries", "stream=index", "-of", "csv=p=0", str(path)],
-            capture_output=True, text=True, check=False, encoding="utf-8",
-        )
-    except FileNotFoundError as exc:
-        raise VideoProcessingError("ffprobe is not installed") from exc
-    if result.returncode:
-        raise VideoProcessingError(result.stderr.strip() or "Could not inspect audio")
-    return bool(result.stdout.strip())
+    return bool(execute([settings.ffprobe_binary, "-v", "error", "-select_streams", "a:0",
+        "-show_entries", "stream=index", "-of", "csv=p=0", str(path)], timeout=30).strip())
 
 
 def _auto_subtitles(clips: list[tuple[int, float, float]], destination: Path,
@@ -462,6 +484,7 @@ def _auto_subtitles(clips: list[tuple[int, float, float]], destination: Path,
     return save_subtitles(destination, sorted(cues, key=lambda cue: cue.start))
 
 
+@_render_operation
 def render_sequence(
     video_id: int,
     params: dict[str, Any],
@@ -533,6 +556,7 @@ def render_sequence(
     if video_layers:
         resolved_video_layers = _validated_video_layers(video_layers, video_id, total_duration)
 
+    fps = output_fps(params, clips[0][0])
     vertical = bool(params.get("is_vertical", True))
     crop_position = min(max(float(params.get("crop_position", 0.5)), 0.0), 1.0)
     if vertical:
@@ -543,16 +567,16 @@ def render_sequence(
         dimensions = "640:360" if preview else "1280:720"
         video_filter = (f"scale={dimensions}:force_original_aspect_ratio=decrease,"
                         f"pad={dimensions}:(ow-iw)/2:(oh-ih)/2")
-    command = [settings.ffmpeg_binary, "-hide_banner", "-loglevel", "error", "-y"]
+    command = [settings.ffmpeg_binary, "-hide_banner", "-loglevel", "error", "-y", "-filter_complex_threads", "1"]
     for source, _, _ in clips:
         command += ["-i", str(source)]
     if music:
         command += ["-stream_loop", "-1", "-i", str(music)]
     filters = []
     for index, (source, start, end) in enumerate(clips):
-        filters.append(f"[{index}:v:0]trim=start={start}:end={end},setpts=PTS-STARTPTS,{video_filter},setsar=1,fps=30,settb=AVTB,format=yuv420p[v{index}]")
+        filters.append(f"[{index}:v:0]trim=start={start}:end={end},setpts=PTS-STARTPTS,{video_filter},setsar=1,fps={fps},settb=AVTB,format=yuv420p[v{index}]")
         if _has_audio(source):
-            filters.append(f"[{index}:a:0]atrim=start={start}:end={end},asetpts=PTS-STARTPTS,aresample=44100,aformat=channel_layouts=stereo[a{index}]")
+            filters.append(f"[{index}:a:0]atrim=start={start}:end={end},asetpts=PTS-STARTPTS,aresample=44100,aformat=channel_layouts=stereo,apad,atrim=duration={end-start}[a{index}]")
         else:
             filters.append(f"anullsrc=r=44100:cl=stereo,atrim=duration={end-start},asetpts=PTS-STARTPTS[a{index}]")
     if transition == "dissolve" and len(clips) > 1:
@@ -582,7 +606,7 @@ def render_sequence(
         for layer in resolved_video_layers:
             path = layer["path"]
             source_state.append((str(path), path.stat().st_mtime_ns, path.stat().st_size))
-        signature = hashlib.sha256(json.dumps(["preview-v1", params, source_state],
+        signature = hashlib.sha256(json.dumps(["preview-v2", params, source_state],
                                                sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
         final_path = settings.cache_folder / f"preview-{video_id}-{signature}.mp4"
         if final_path.is_file():
@@ -601,7 +625,8 @@ def render_sequence(
                         "-c:v", "libx264", "-preset", "ultrafast" if preview else "medium",
                         "-crf", "30" if preview else "23", "-pix_fmt", "yuv420p",
                         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(joined)]
-            _run(command)
+            _run(command, total_duration,
+                 (lambda percent: progress_callback(10 + round(percent * 0.65))) if progress_callback else None)
             if progress_callback:
                 progress_callback(75)
             current = joined
@@ -634,13 +659,14 @@ def render_sequence(
                 captioned = Path(temp_dir) / "captioned.mp4"
                 add_text(current, captioned, subtitle_text,
                          position=str(params.get("text_position", "bottom")),
-                         font_size=max(24, round(int(params.get("font_size", 64)) * (0.5 if preview else 1))),
-                         font_color=str(params.get("font_color", "white")))
+                         font_size=int(params.get("font_size", 64)),
+                         font_color=str(params.get("font_color", "white")), render_scale=0.5 if preview else 1.0)
                 current = captioned
                 if progress_callback:
                     progress_callback(98)
+            duration = probe_duration(current)
+            current_control().check()
             shutil.move(str(current), final_path)
-        duration = probe_duration(final_path)
         if progress_callback:
             progress_callback(100)
         return str(final_path), duration
@@ -655,6 +681,7 @@ def render_preview(video_id: int, params: dict[str, Any],
     return render_sequence(video_id, params, progress_callback, preview=True)
 
 
+@_render_operation
 def render_video(
     video_id: int,
     params: dict[str, Any],
@@ -677,7 +704,7 @@ def render_video(
     start = float(params.get("start_time", 0.0))
     requested_end = params.get("end_time")
     end = source_duration if requested_end is None else float(requested_end)
-    if start < 0 or end <= start or end > source_duration + 0.05:
+    if not all(map(math.isfinite, (start, end))) or start < 0 or end <= start or end > source_duration + 0.05:
         raise VideoProcessingError(
             f"Invalid trim range. Expected 0 <= start < end <= {source_duration:.2f}"
         )
@@ -688,7 +715,7 @@ def render_video(
     with tempfile.TemporaryDirectory(dir=settings.output_folder, prefix=f"render-{video_id}-") as temp_dir:
         temp_root = Path(temp_dir)
         trimmed = temp_root / "01-trimmed.mp4"
-        trim_video(source, trimmed, start, end)
+        trim_video(source, trimmed, start, end, fps=output_fps(params, source))
         current = trimmed
         report(45)
 
@@ -725,8 +752,8 @@ def render_video(
             current = captioned
         report(92)
 
+        rendered_duration = probe_duration(current)
+        current_control().check()
         shutil.move(str(current), final_path)
-
-    rendered_duration = probe_duration(final_path)
     report(100)
     return str(final_path), rendered_duration

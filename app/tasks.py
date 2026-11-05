@@ -8,6 +8,7 @@ from typing import Any, Callable
 from sqlalchemy import update
 
 from app.config import settings
+from app.media_process import RenderCancelled
 from app.models import ConnectedAccount, Post, SessionLocal, Video
 from app.services.direct_publishing import (
     PublicationUncertain,
@@ -89,12 +90,15 @@ def render_video(
         # Keep them until an explicit, reference-aware cleanup operation is requested.
         return output_path, duration
     except Exception as exc:
-        logger.exception("Rendering failed for video %s", video_id)
+        if isinstance(exc, RenderCancelled):
+            logger.info("Rendering cancelled for video %s", video_id)
+        else:
+            logger.exception("Rendering failed for video %s", video_id)
         with SessionLocal() as session:
             video = session.get(Video, video_id)
             if video:
-                video.status = "error"
-                video.error_message = str(exc)[:2000]
+                video.status = ("ready" if video.output_path else "uploaded") if isinstance(exc, RenderCancelled) else "error"
+                video.error_message = None if isinstance(exc, RenderCancelled) else str(exc)[:2000]
                 session.commit()
         raise
 

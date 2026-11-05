@@ -35,6 +35,7 @@ class EditWidget(QFrame):
     overlay_changed = pyqtSignal(str)
     busy_changed = pyqtSignal(bool)
     render_started = pyqtSignal()
+    cancel_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -109,8 +110,24 @@ class EditWidget(QFrame):
         text_form.addRow("Положение", self.text_position)
         text_form.addRow("Размер", self.font_size)
         text_form.addRow("Цвет", self.font_color)
+        export_tab = QWidget()
+        export_form = QFormLayout(export_tab)
+        self.fps = QComboBox()
+        for label, value in (("Как у первого клипа (CFR)", "source"), ("24", "24"), ("25", "25"),
+                             ("30", "30"), ("50", "50"), ("60", "60")):
+            self.fps.addItem(label, value)
+        self.fps.setCurrentIndex(self.fps.findData("30"))
+        self.quality = QComboBox()
+        self.quality.addItem("Стандартное (CRF 23)", "standard")
+        self.quality.addItem("Высокое (CRF 18)", "high")
+        export_form.addRow("Кадров/сек.", self.fps)
+        export_form.addRow("Качество", self.quality)
+        export_info = QLabel("MP4 · H.264 · yuv420p · AAC\n9:16 — 1080×1920; 16:9 — 1280×720\nVFR приводится к постоянной частоте кадров.")
+        export_info.setWordWrap(True)
+        export_form.addRow(export_info)
         tabs.addTab(clip_tab, "Клип")
         tabs.addTab(text_tab, "Текст")
+        tabs.addTab(export_tab, "Экспорт")
         layout.addWidget(tabs)
 
         self.progress = QProgressBar()
@@ -123,6 +140,10 @@ class EditWidget(QFrame):
         self.render_button.setObjectName("primaryButton")
         self.render_button.clicked.connect(self.start_render)
         layout.addWidget(self.render_button)
+        self.cancel_button = QPushButton("Отменить обработку")
+        self.cancel_button.setVisible(False)
+        self.cancel_button.clicked.connect(self.cancel_render)
+        layout.addWidget(self.cancel_button)
 
         result_row = QVBoxLayout()
         self.save_button = QPushButton("Сохранить как…")
@@ -240,6 +261,8 @@ class EditWidget(QFrame):
 
         self.render_button.setEnabled(False)
         self.edit_tabs.setEnabled(False)
+        self.cancel_button.setVisible(True)
+        self.cancel_button.setEnabled(True)
         self.busy_changed.emit(True)
         self.save_button.setVisible(False)
         self.publish_button.setVisible(False)
@@ -251,6 +274,7 @@ class EditWidget(QFrame):
         self.worker.progress.connect(self.progress.setValue)
         self.worker.succeeded.connect(self._render_succeeded)
         self.worker.error.connect(self._render_failed)
+        self.worker.cancelled.connect(self._render_cancelled)
         self.worker.finished.connect(self._render_finished)
         self.worker.start()
 
@@ -279,7 +303,21 @@ class EditWidget(QFrame):
             "text_position": self.text_position.currentData(),
             "font_size": self.font_size.value(),
             "font_color": self.font_color.currentData(),
+            "fps": self.fps.currentData(),
+            "quality": self.quality.currentData(),
         }
+
+    def cancel_render(self) -> None:
+        self.cancel_button.setEnabled(False)
+        self.progress.setFormat("Остановка FFmpeg…")
+        if self.worker:
+            self.worker.cancel()
+        self.cancel_requested.emit()
+
+    def _render_cancelled(self) -> None:
+        self.progress.setValue(0)
+        self.progress.setFormat("Экспорт отменён")
+        self.log_message.emit("Экспорт отменён. Предыдущие файлы сохранены.")
 
     def _render_succeeded(self, output_path: str, duration: float) -> None:
         self.output_path = output_path
@@ -296,9 +334,14 @@ class EditWidget(QFrame):
         self.progress.setValue(0)
         self.progress.setFormat("Ошибка экспорта")
         self.log_message.emit(f"Ошибка экспорта: {message}")
-        QMessageBox.critical(self, "Ошибка обработки", message)
+        dialog = QMessageBox(QMessageBox.Icon.Critical, "Ошибка обработки",
+                             "Не удалось экспортировать видео. Проверьте исходные файлы, свободное место и параметры монтажа.",
+                             parent=self)
+        dialog.setDetailedText(message)
+        dialog.exec()
 
     def _render_finished(self) -> None:
+        self.cancel_button.setVisible(False)
         self.render_button.setEnabled(True)
         self.edit_tabs.setEnabled(True)
         worker = self.sender()

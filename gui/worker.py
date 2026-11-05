@@ -6,6 +6,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from app.config import settings
 from app.models import SessionLocal, Video
+from app.media_process import RenderControl, RenderCancelled, media_operation
 from app.tasks import (
     analyze_video_for_clips,
     probe_video,
@@ -94,20 +95,25 @@ class RenderWorker(QThread):
     progress = pyqtSignal(int)
     succeeded = pyqtSignal(str, float)
     error = pyqtSignal(str)
+    cancelled = pyqtSignal()
 
     def __init__(self, video_id: int, params: dict, parent=None):
         super().__init__(parent)
         self.video_id = video_id
         self.params = params
+        self.control = RenderControl()
+
+    def cancel(self) -> None:
+        self.control.cancel()
 
     def run(self) -> None:
         try:
-            output_path, duration = render_video(
-                self.video_id,
-                self.params,
-                progress_callback=self.progress.emit,
-            )
+            with media_operation(self.control):
+                output_path, duration = render_video(
+                    self.video_id, self.params, progress_callback=self.progress.emit)
             self.succeeded.emit(output_path, duration)
+        except RenderCancelled:
+            self.cancelled.emit()
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -116,18 +122,26 @@ class PreviewRenderWorker(QThread):
     progress = pyqtSignal(int)
     succeeded = pyqtSignal(str, float)
     error = pyqtSignal(str)
+    cancelled = pyqtSignal()
 
     def __init__(self, video_id: int, params: dict, parent=None):
         super().__init__(parent)
         self.video_id = video_id
         self.params = params
+        self.control = RenderControl()
+
+    def cancel(self) -> None:
+        self.control.cancel()
 
     def run(self) -> None:
         try:
             from app.video_processor import render_preview
 
-            output_path, duration = render_preview(self.video_id, self.params, self.progress.emit)
+            with media_operation(self.control):
+                output_path, duration = render_preview(self.video_id, self.params, self.progress.emit)
             self.succeeded.emit(output_path, duration)
+        except RenderCancelled:
+            self.cancelled.emit()
         except Exception as exc:
             self.error.emit(str(exc))
 

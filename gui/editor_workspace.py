@@ -40,6 +40,7 @@ from gui.video_layers_widget import VideoLayersWidget
 
 
 class EditorWorkspace(QWidget):
+    processing_changed = pyqtSignal(bool)
     video_ready = pyqtSignal(int, int)
     render_completed = pyqtSignal(int, str, float)
     publish_requested = pyqtSignal()
@@ -258,6 +259,9 @@ class EditorWorkspace(QWidget):
         self.edit_widget.overlay_changed.connect(self._overlay_changed)
         self.edit_widget.text_position.currentIndexChanged.connect(self._update_overlay_position)
         self.edit_widget.font_size.valueChanged.connect(self._update_overlay_position)
+        self.edit_widget.fps.currentIndexChanged.connect(self._sequence_changed)
+        self.edit_widget.quality.currentIndexChanged.connect(self._sequence_changed)
+        self.edit_widget.cancel_requested.connect(self._cancel_effect_preview)
         self.edit_widget.font_color.currentIndexChanged.connect(self._update_overlay_position)
         self.edit_widget.auto_subtitles.toggled.connect(lambda _checked: self._mark_modified())
         self.edit_widget.vertical_checkbox.toggled.connect(self._update_overlay_position)
@@ -354,6 +358,7 @@ class EditorWorkspace(QWidget):
         self.layers_widget.setEnabled(not busy)
         self.video_layers_widget.setEnabled(not busy)
         self.ai_button.setEnabled(not busy and self.video_id is not None)
+        self.processing_changed.emit(busy)
 
     def shutdown_preview(self) -> None:
         self._preview_timer.stop()
@@ -449,7 +454,9 @@ class EditorWorkspace(QWidget):
         self.edit_widget.crop_position.setValue(round(float(draft_editor.get("crop_position", saved.get("crop_position", 0.5))) * 100))
         self.edit_widget.font_size.setValue(int(draft_editor.get("font_size", saved.get("font_size", 64))))
         for combo, key, default in ((self.edit_widget.text_position, "text_position", "bottom"),
-                                    (self.edit_widget.font_color, "font_color", "white")):
+                                    (self.edit_widget.font_color, "font_color", "white"),
+                                    (self.edit_widget.fps, "fps", "30"),
+                                    (self.edit_widget.quality, "quality", "standard")):
             combo.setCurrentIndex(max(0, combo.findData(draft_editor.get(key, saved.get(key, default)))))
         self._draft_dirty = bool(sequence_saved.get("dirty", not bool(video.output_path))) or bool(loaded and loaded.recovered)
         self._update_overlay_position()
@@ -616,14 +623,26 @@ class EditorWorkspace(QWidget):
         self._render_busy_changed(True)
         self.edit_widget.edit_tabs.setEnabled(False)
         self.edit_widget.render_button.setEnabled(False)
+        self.edit_widget.cancel_button.setVisible(True)
+        self.edit_widget.cancel_button.setEnabled(True)
         self.preview_status.setText("Подготовка просмотра с эффектами…")
         worker = PreviewRenderWorker(self.video_id, self.edit_widget.build_render_params(), self)
         self._effect_preview_worker = worker
         worker.progress.connect(lambda percent: self.preview_status.setText(f"Предпросмотр FFmpeg · {percent}%"))
         worker.succeeded.connect(self._effect_preview_ready)
         worker.error.connect(self._effect_preview_failed)
+        worker.cancelled.connect(self._effect_preview_cancelled)
         worker.finished.connect(self._effect_preview_finished)
         worker.start()
+
+    def _cancel_effect_preview(self) -> None:
+        if self._effect_preview_worker:
+            self._effect_preview_worker.cancel()
+            self.preview_status.setText("Остановка предпросмотра…")
+
+    def _effect_preview_cancelled(self) -> None:
+        self.preview_status.setText("Подготовка предпросмотра отменена")
+        self._preview_sequence_clip(self._effect_restore_index)
 
     def _effect_preview_ready(self, path: str, duration: float) -> None:
         self._effect_preview_active = True
@@ -645,10 +664,14 @@ class EditorWorkspace(QWidget):
     def _effect_preview_failed(self, message: str) -> None:
         self.log_message.emit(f"Ошибка предпросмотра FFmpeg: {message}")
         self.preview_status.setText("Предпросмотр не удался")
-        QMessageBox.warning(self, "Ошибка предпросмотра", message)
+        dialog = QMessageBox(QMessageBox.Icon.Warning, "Ошибка предпросмотра",
+                             "Не удалось подготовить предпросмотр. Проверьте исходные файлы и параметры монтажа.", parent=self)
+        dialog.setDetailedText(message)
+        dialog.exec()
         self._preview_sequence_clip(self._effect_restore_index)
 
     def _effect_preview_finished(self) -> None:
+        self.edit_widget.cancel_button.setVisible(False)
         worker = self._effect_preview_worker
         self._effect_preview_worker = None
         if worker:
