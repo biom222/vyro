@@ -2,6 +2,12 @@
 
 Cross-platform PyQt6 desktop application for trimming, positioning a vertical crop, captioning, exporting, and publishing vertical videos. All media processing runs locally through FFmpeg in `QThread`; no FastAPI server, Redis, or RQ worker is required.
 
+Current stage: technical desktop alpha, not a production release. The local FFmpeg
+editor has real smoke verification; external publishing/AI/analytics adapters have
+contract tests but no recorded live end-to-end verification. Start with the audited
+[product status](docs/PRODUCT_STATUS.md) and [production roadmap](docs/PRODUCTION_ROADMAP.md)
+before treating a feature list as a release guarantee.
+
 ## Features
 
 - Eight-section creator workspace with dashboard, editor, AI clips, trends,
@@ -41,10 +47,12 @@ The backend is now independent from the GUI and includes:
 - PKCE OAuth request/token helpers; refresh tokens are referenced from the database and stored
   in the operating-system keyring
 - Local post scheduler and a dashboard aggregation service
-- Atomic publication claiming, retry/backoff, and duplicate-publication protection
+- Atomic publication claiming and retry/backoff scaffolding; uncertain-state retry
+  and restart recovery still require hardening (see product status)
 - OAuth state persistence/validation and automatic access-token refresh for Analytics
 - Idempotent Analytics periods and deduplicated unchanged trend snapshots
-- Shared retry handling for transient HTTP, 429, and 5xx failures
+- A shared retry helper for transient HTTP, 429, and 5xx failures; direct publication
+  adapters still need consistent retry/error classification
 - Copyright-risk hints that always require manual review
 - A CLI and environment doctor for headless administration and diagnostics
 - Alembic migrations with automatic upgrades and a backup/stamp path for legacy SQLite databases
@@ -137,19 +145,37 @@ python main.py
 On Windows, you can also double-click `Запустить vyro.bat` in the project folder.
 
 The application upgrades `video_editor.sqlite3` to the latest Alembic revision automatically.
-Before adopting or upgrading an existing SQLite database, it writes a timestamped backup to `data/`.
+Before adopting or upgrading an existing SQLite database, it creates and verifies an
+online SQLite backup under `data/backups/`. Failed/interrupted migrations restore that
+copy; replaced partial files are retained under `data/recovery/`. Startup validates the
+physical schema, and offers a backup selection dialog if the database cannot open safely.
 Rendered files are written to `outputs/` before they can be copied elsewhere with **Сохранить как…**.
 
 Projects are editable drafts stored in the local SQLite database; an MP4 is needed only for
 export or publication. Changes to clip order/ranges, music, transitions, overlays, title keyframes, caption/style, crop,
 and the selected clip are saved automatically. Use **Файл → Сохранить проект** (`Ctrl+S`) to
 save immediately, then **Файл → Открыть проект…** or **История → Проекты** to resume editing.
+The status bar reports pending/saved/error state; an unsuccessful save prevents window
+close or project switching. The last 20 checksum-checked draft versions are kept and
+reopen can recover the last valid version. An abrupt crash can lose edits within the
+400 ms autosave debounce; a valid saved version remains available.
+
+Use **Файл → Сохранить проект как…** (`Ctrl+Shift+S`) or **История → Дублировать проект…**
+for independent project edits. Copies share retained source media/music and copy
+subtitle transcripts, layers/keyframes and publication drafts; queued/published jobs
+are not duplicated. This is a local-library copy, not a portable project archive.
+**Сохранить копию** for an exported MP4 uses `Ctrl+Alt+S`. New posts pin the chosen
+export; older exports are retained so a later render cannot delete their selected file.
+
 Newly imported videos and music selected through the GUI are copied into `uploads/` in a
 background thread, so moving the original files does not break new projects. Older projects
 may still reference external paths. If a video source is missing, open its details under
 **История → Видео и публикации** and use **Перепривязать исходник…**; the replacement must
 match the original duration and resolution. Relinking invalidates the previous export, so
 render again before publishing. Missing files are reported when reopening a project.
+Startup removes only old, unreferenced disposable previews/partial-render artifacts;
+original media and final exports are not automatically deleted. See the precise safety
+boundaries and checks in [the Phase 1 report](docs/PHASE1_REPORT.md).
 
 ## Technical CLI
 
@@ -233,7 +259,9 @@ Open **Аккаунты** in the top menu, hover over a service, and choose **Д
 
 The publication screen offers the selected account's TikTok privacy options or YouTube visibility. Confirm the target before sending. Instagram publication supports professional accounts connected to a Facebook Page and creates Reels. TikTok and Instagram can remain in a pending state while the provider processes the upload; vyro polls for completion without uploading a second copy. If the provider's response is uncertain, inspect the account before retrying. With no developer keys, the editor and export still work, but live publication is unavailable; the old Taisly mock is no longer used by the desktop workflow.
 
-Provider restrictions apply: YouTube uploads from unverified API projects can be private-only, TikTok unaudited clients are restricted to private viewing, and Instagram requires a professional account and applicable Meta permissions. These are provider-side requirements, not settings vyro can bypass.
+Live access depends on each provider's current account capabilities, permissions and
+approval conditions. Those gates must be verified during the corresponding live phase;
+configured credentials and passing mocked responses alone do not establish live access.
 
 ## Project structure
 
@@ -267,7 +295,9 @@ gui/
 main.py                 Desktop entry point
 ```
 
-`app/main.py`, `app/templates/`, and `app/static/` are retained only for compatibility with the earlier web prototype. They are not loaded by the desktop application.
+`app/main.py` is a compatibility desktop launcher for `python -m app.main`.
+`app/templates/` and `app/static/` are unused legacy web assets; no active FastAPI server
+is provided. They remain pending the documented legacy cleanup decision.
 
 ## Tests
 
@@ -286,15 +316,13 @@ python tests/editor_smoke.py
 
 It creates test media, an isolated database, and screenshots under `work/editor-check/`.
 
-They cover Alembic upgrades, database updates, projects, transcripts, subtitle formats, AI contracts, trend snapshots,
+They cover the fresh Alembic baseline, database updates, projects, transcripts, subtitle formats, AI contracts, trend snapshots,
 OAuth refresh, idempotent analytics, scheduler failure isolation, duplicate-publication protection,
 OAuth channel connection, mocked direct API upload contracts, background scheduler lifecycle, probe/render contracts, and construction of
 the complete eight-section workspace.
 
-An optional containerized headless check remains available:
-
-```bash
-docker compose up --build --abort-on-container-exit
-```
-
-The desktop GUI itself should be launched directly on the host with `python main.py`; displaying a native GUI from Docker is intentionally outside this MVP.
+The retained Docker/Compose files are engineering scaffolding, not a desktop runtime
+requirement. Their current image omits migration assets, so the container check is not
+part of the passing Phase 0 baseline. Launch the desktop GUI on the host with
+`python main.py` or the local executable. Legacy schema parity, crash recovery, live
+providers, clean-machine installation and scaling coverage remain separate release gates.

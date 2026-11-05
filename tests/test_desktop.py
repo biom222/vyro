@@ -3,6 +3,9 @@ import json
 import tempfile
 import unittest
 import sys
+import subprocess
+import sqlite3
+from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +17,8 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ["DATABASE_URL"] = f"sqlite:///{Path(TEST_ROOT.name, 'test.sqlite3').as_posix()}"
 os.environ["UPLOAD_FOLDER"] = str(Path(TEST_ROOT.name, "uploads"))
 os.environ["OUTPUT_FOLDER"] = str(Path(TEST_ROOT.name, "outputs"))
+os.environ["DATA_FOLDER"] = str(Path(TEST_ROOT.name, "data"))
+os.environ["CACHE_FOLDER"] = str(Path(TEST_ROOT.name, "cache"))
 os.environ["TAISLY_API_KEY"] = ""
 
 from PyQt6.QtWidgets import QApplication
@@ -94,11 +99,14 @@ class DesktopTests(unittest.TestCase):
             return video.id
 
     def test_bundle_in_checkout_uses_project_env(self):
-        executable = app_config.SOURCE_ROOT / "dist" / "vyro" / "vyro.exe"
-        with patch.object(sys, "frozen", True, create=True), patch.object(
-            sys, "executable", str(executable)
-        ):
-            self.assertEqual(app_config._settings_env_file(), app_config.SOURCE_ROOT / ".env")
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            (checkout / "main.py").touch()
+            (checkout / ".env").touch()
+            with patch.object(sys, "frozen", True, create=True), patch.object(
+                sys, "executable", str(checkout / "dist" / "vyro" / "vyro.exe")
+            ):
+                self.assertEqual(app_config._settings_env_file(), checkout / ".env")
 
     def test_title_keyframes_and_project_video_layers(self):
         primary_id = self.create_video("layer-primary.mp4")
@@ -344,6 +352,9 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(post.account_id, account_id)
             self.assertEqual(post.platform, "youtube")
             self.assertEqual(post.payload_json["youtube_privacy"], "private")
+        widget.clear_video()
+        self.assertIsNone(widget.video_id)
+        self.assertFalse(widget.publish_button.isEnabled())
         widget.close()
 
     def test_accounts_menu_checks_only_selected_account(self):
@@ -894,6 +905,294 @@ class DesktopTests(unittest.TestCase):
                 date(2026, 9, 27),
                 {"columnHeaders": [{"name": "views"}], "rows": []},
             )
+
+    def safety_project(self):
+        video_id = self.create_video("safety-" + str(datetime.now().timestamp()) + ".mp4")
+        project = create_project_for_video(video_id)
+        with SessionLocal.begin() as session:
+            session.get(Video, video_id).duration = 10
+        return project.id, {"schema_version": 1, "primary_id": video_id,
+            "clips": [{"video_id": video_id, "start_time": 0, "end_time": 8}],
+            "title_layers": [], "video_layers": [], "editor": {}, "music_path": "", "dirty": True}
+
+    def test_project_revisions_are_atomic_recoverable_and_conflict_checked(self):
+        from app.models import AppPreference, ProjectRevision
+        from app.services.project_state import (draft_key, load_project_state, save_project_state,
+                                                ProjectConflict, ProjectStateError)
+        project_id, state = self.safety_project()
+        self.assertEqual(save_project_state(project_id, state, 0), 1)
+        with self.assertRaises(ProjectConflict):
+            save_project_state(project_id, {**state, "playhead": 3}, 0)
+        with self.assertRaises(ProjectStateError):
+            save_project_state(project_id, {**state, "clips": []}, 1)
+        with self.assertRaises(ProjectStateError):
+            save_project_state(project_id, {**state, "editor": {"crop_position": "invalid"}}, 1)
+        from sqlalchemy import event
+        def fail_insert(_connection, _cursor, statement, *args):
+            if "INSERT INTO project_revisions" in statement:
+                raise RuntimeError("Simulated interrupted save")
+        event.listen(engine, "before_cursor_execute", fail_insert)
+        try:
+            with self.assertRaises(RuntimeError):
+                save_project_state(project_id, {**state, "playhead": 7}, 1)
+        finally:
+            event.remove(engine, "before_cursor_execute", fail_insert)
+        self.assertEqual(load_project_state(project_id).state, state)
+        with SessionLocal.begin() as session:
+            from sqlalchemy import text
+            session.execute(text("UPDATE app_preferences SET value_json='{' WHERE key=:key"), {"key": draft_key(project_id)})
+        from gui.history_widget import HistoryWidget
+        from PyQt6.QtCore import Qt
+        history = HistoryWidget()
+        row = next(row for row in range(history.projects_table.rowCount())
+                   if history.projects_table.item(row, 0).text() == str(project_id))
+        self.assertEqual(history.projects_table.item(row, 0).data(Qt.ItemDataRole.UserRole), state["primary_id"])
+        history.close()
+        recovered = load_project_state(project_id)
+        self.assertTrue(recovered.recovered)
+        self.assertEqual(recovered.state, state)
+        self.assertEqual(save_project_state(project_id, recovered.state, 1), 2)
+        self.assertFalse(load_project_state(project_id).recovered)
+        with SessionLocal() as session:
+            self.assertEqual(session.get(Project, project_id).draft_revision, 2)
+            self.assertIsNotNone(session.get(ProjectRevision, (project_id, 1)))
+
+    def test_project_duplicate_has_independent_edits_and_preserves_sources(self):
+        from app.services.project_state import load_project_state, save_project_state
+        from app.services.projects import duplicate_project
+        project_id, state = self.safety_project()
+        video_id = state["primary_id"]
+        with SessionLocal.begin() as session:
+            session.add(Transcript(video_id=video_id, text="Speech", status="ready",
+                segments=[TranscriptSegment(start_time=0, end_time=1, text="Speech")]))
+        state["video_layers"] = [{"video_id": video_id, "start": 0, "end": 1}]
+        state["publication"] = {"account_id": None, "title": "Copied caption", "options": {"youtube_privacy": "private"}}
+        from sqlalchemy import select, func
+        with SessionLocal.begin() as session:
+            session.add(Post(video_id=video_id, platform="youtube", status="queued"))
+        with SessionLocal() as session:
+            before_posts = session.scalar(select(func.count()).select_from(Post))
+        save_project_state(project_id, state, 0)
+        new_project, new_video = duplicate_project(project_id, "Independent copy")
+        copied = load_project_state(new_project)
+        self.assertNotEqual(new_video, video_id)
+        self.assertEqual(copied.state["video_layers"][0]["video_id"], new_video)
+        self.assertEqual(copied.state["publication"], state["publication"])
+        with SessionLocal() as session:
+            original_path = session.get(Video, video_id).original_path
+            self.assertEqual(session.get(Video, new_video).original_path, original_path)
+            self.assertIsNone(session.get(Video, new_video).output_path)
+            self.assertEqual(len(session.get(Video, new_video).transcripts[0].segments), 1)
+            self.assertEqual(session.scalar(select(func.count()).select_from(Post)), before_posts)
+        save_project_state(new_project, {**copied.state, "playhead": 2}, 1)
+        self.assertEqual(load_project_state(project_id).state, state)
+        self.assertTrue(Path(original_path).is_file())
+
+    def test_shutdown_and_crashed_save_reopen_with_equal_state_in_new_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = {**os.environ, "DATABASE_URL": f"sqlite:///{(root / 'project.sqlite3').as_posix()}",
+                "DATA_FOLDER": str(root / "data"), "UPLOAD_FOLDER": str(root / "uploads"),
+                "OUTPUT_FOLDER": str(root / "outputs"), "CACHE_FOLDER": str(root / "cache")}
+            script = str(Path(__file__).with_name("project_restart_check.py"))
+            for mode, expected_code in (("create", 0), ("read", 0), ("crash", 23), ("read", 0)):
+                result = subprocess.run([sys.executable, script, mode, directory], env=environment,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, expected_code, result.stderr)
+
+    def test_gui_refuses_close_when_project_save_fails(self):
+        from PyQt6.QtGui import QCloseEvent
+        window = MainWindow()
+        event = QCloseEvent()
+        with patch.object(window.editor_workspace, "save_project", return_value=False):
+            window.closeEvent(event)
+        self.assertFalse(event.isAccepted())
+        window.close()
+
+    def test_cleanup_only_removes_stale_disposable_unreferenced_files(self):
+        from app.services.storage import cleanup_stale_artifacts
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preview = root / "preview-1-abcdef.mp4"
+            source = root / "source.mp4"
+            unknown = root / "keep-me.mp4"
+            referenced = root / "preview-2-abcdef.mp4"
+            for path in (preview, source, unknown, referenced):
+                path.write_bytes(b"keep or disposable")
+                os.utime(path, (1, 1))
+            with SessionLocal.begin() as session:
+                session.add(Video(filename="Protected", original_path=str(referenced)))
+            with patch.object(settings, "cache_folder", root), patch.object(settings, "output_folder", root / "outputs"), patch.object(settings, "upload_folder", root / "uploads"):
+                removed = cleanup_stale_artifacts(now=200000)
+            self.assertEqual(removed, [preview])
+            self.assertTrue(source.is_file() and unknown.is_file())
+            self.assertTrue(referenced.is_file())
+
+    def test_sqlite_online_backup_and_interrupted_migration_restore(self):
+        from sqlalchemy import create_engine
+        from app import database
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "safe.sqlite3"
+            local_engine = create_engine(f"sqlite:///{path.as_posix()}")
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("CREATE TABLE sample (value TEXT)")
+                connection.execute("INSERT INTO sample VALUES ('original')")
+                connection.commit()
+                with patch.object(settings, "database_url", f"sqlite:///{path.as_posix()}"), patch.object(settings, "data_folder", root / "data"), patch.object(database, "engine", local_engine):
+                    backup = database.backup_database()
+                    with closing(sqlite3.connect(backup)) as saved:
+                        self.assertEqual(saved.execute("SELECT value FROM sample").fetchone()[0], "original")
+                connection.close()
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("UPDATE sample SET value='partial'")
+                connection.commit()
+            with patch.object(settings, "database_url", f"sqlite:///{path.as_posix()}"), patch.object(settings, "data_folder", root / "data"), patch.object(database, "engine", local_engine):
+                database._write_marker(path, backup)
+                self.assertTrue(database.recover_interrupted_migration())
+                self.assertFalse(database._marker_path(path).exists())
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(connection.execute("SELECT value FROM sample").fetchone()[0], "original")
+            self.assertTrue(list((root / "data" / "recovery").glob("*.before-restore")))
+            local_engine.dispose()
+
+    def test_migration_repairs_legacy_schema_and_matches_models(self):
+        from sqlalchemy import create_engine
+        from alembic import command
+        from alembic.operations import Operations
+        from alembic.migration import MigrationContext
+        from alembic.autogenerate import compare_metadata
+        from app import database
+        from app.models import Base
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "legacy.sqlite3"
+            local_engine = create_engine(f"sqlite:///{path.as_posix()}")
+            with patch.object(settings, "database_url", f"sqlite:///{path.as_posix()}"), patch.object(settings, "data_folder", root / "data"), patch.object(database, "engine", local_engine):
+                command.upgrade(database.alembic_config(), "beb1f4933f58")
+                with local_engine.begin() as connection:
+                    operations = Operations(MigrationContext.configure(connection))
+                    with operations.batch_alter_table("analytics_snapshots", recreate="always") as batch:
+                        batch.drop_constraint("uq_analytics_period", type_="unique")
+                        batch.alter_column("raw_schema_version", nullable=True)
+                    convention = {"fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s"}
+                    with operations.batch_alter_table("posts", recreate="always", naming_convention=convention) as batch:
+                        batch.drop_constraint("fk_posts_account_id_connected_accounts", type_="foreignkey")
+                        batch.alter_column("retry_count", nullable=True)
+                    operations.drop_index("ix_videos_project_id", table_name="videos")
+                database.upgrade_database()
+                with local_engine.connect() as connection:
+                    self.assertEqual(compare_metadata(MigrationContext.configure(connection), Base.metadata), [])
+                self.assertTrue(list((root / "data" / "backups").glob("*.bak")))
+            local_engine.dispose()
+
+    def test_corrupt_database_is_preserved_and_error_is_readable(self):
+        from app import database
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "corrupt.sqlite3"
+            original = b"this is not SQLite"
+            path.write_bytes(original)
+            with self.assertRaises(database.DatabaseSafetyError):
+                database._check_sqlite(path)
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_interrupted_migration_recovers_in_a_new_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = {**os.environ, "DATABASE_URL": f"sqlite:///{(root / 'legacy.sqlite3').as_posix()}",
+                           "DATA_FOLDER": str(root / "data")}
+            script = str(Path(__file__).with_name("project_restart_check.py"))
+            for mode, code in (("migration-create", 0), ("migration-crash", 24), ("migration-read", 0)):
+                result = subprocess.run([sys.executable, script, mode, directory], env=environment,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, code, result.stderr)
+
+    def test_failed_migration_restores_previous_schema_and_data(self):
+        from sqlalchemy import create_engine
+        from alembic import command
+        from app import database
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "failed.sqlite3"
+            local_engine = create_engine(f"sqlite:///{path.as_posix()}")
+            with patch.object(settings, "database_url", f"sqlite:///{path.as_posix()}"), patch.object(settings, "data_folder", root / "data"), patch.object(database, "engine", local_engine):
+                command.upgrade(database.alembic_config(), "beb1f4933f58")
+                def fail(*args, **kwargs):
+                    with local_engine.begin() as connection:
+                        connection.exec_driver_sql("CREATE TABLE partial_migration (id INTEGER)")
+                    raise RuntimeError("Simulated DDL failure")
+                with patch.object(database.command, "upgrade", side_effect=fail):
+                    with self.assertRaises(database.DatabaseSafetyError):
+                        database.upgrade_database()
+                from sqlalchemy import inspect
+                self.assertNotIn("partial_migration", inspect(local_engine).get_table_names())
+                self.assertEqual(database.current_revision(), "beb1f4933f58")
+            local_engine.dispose()
+
+    def test_missing_media_and_invalid_paths_do_not_destroy_last_draft(self):
+        from app.services.project_state import save_project_state, load_project_state, ProjectStateError
+        project_id, state = self.safety_project()
+        save_project_state(project_id, state, 0)
+        with self.assertRaises(ProjectStateError):
+            save_project_state(project_id, {**state, "music_path": "../outside.wav"}, 1)
+        with self.assertRaises(ProjectStateError):
+            save_project_state(project_id, {**state, "publication": {"access_token": "forbidden"}}, 1)
+        with SessionLocal() as session:
+            source = Path(session.get(Video, state["primary_id"]).original_path)
+        source.unlink()
+        loaded = load_project_state(project_id)
+        self.assertIn(str(source), loaded.missing_files)
+        self.assertEqual(loaded.state, state)
+
+    def test_publication_form_restores_project_metadata_without_sending(self):
+        account = upsert_account("youtube", "project-draft-account", "Draft account")
+        widget = PublishWidget()
+        expected = {"account_id": account, "title": "Saved title", "description": "Saved description",
+                    "options": {"youtube_privacy": "unlisted"}}
+        widget.restore_draft(expected)
+        self.assertEqual(widget.publication_draft()["title"], expected["title"])
+        self.assertEqual(widget.publication_draft()["account_id"], account)
+        self.assertEqual(widget.publication_draft()["options"]["youtube_privacy"], "unlisted")
+        widget.close()
+
+    def test_unversioned_legacy_database_is_adopted_and_repaired(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = {**os.environ, "DATABASE_URL": f"sqlite:///{(root / 'old.sqlite3').as_posix()}",
+                           "DATA_FOLDER": str(root / "data")}
+            script = str(Path(__file__).with_name("project_restart_check.py"))
+            for mode in ("migration-unversioned-create", "migration-read"):
+                result = subprocess.run([sys.executable, script, mode, directory], env=environment,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_snapshot_history_is_bounded_and_latest_damage_uses_previous_version(self):
+        from app.services.project_state import load_project_state, save_project_state, draft_key
+        from app.models import ProjectRevision, AppPreference
+        from sqlalchemy import select, func
+        project_id, state = self.safety_project()
+        for revision in range(25):
+            save_project_state(project_id, {**state, "playhead": revision / 10}, revision)
+        with SessionLocal.begin() as session:
+            self.assertEqual(session.scalar(select(func.count()).select_from(ProjectRevision).where(ProjectRevision.project_id == project_id)), 20)
+            session.get(AppPreference, draft_key(project_id)).value_json = {"broken": True}
+            from sqlalchemy import text
+            session.execute(text("UPDATE project_revisions SET state='{' WHERE project_id=:project AND revision=25"), {"project": project_id})
+        loaded = load_project_state(project_id)
+        self.assertTrue(loaded.recovered)
+        self.assertEqual(loaded.state["playhead"], 2.3)
+
+    def test_interrupted_first_database_creation_is_recoverable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = {**os.environ, "DATABASE_URL": f"sqlite:///{(root / 'first.sqlite3').as_posix()}",
+                           "DATA_FOLDER": str(root / "data")}
+            script = str(Path(__file__).with_name("project_restart_check.py"))
+            for mode, code in (("migration-empty-crash", 25), ("migration-empty-read", 0)):
+                result = subprocess.run([sys.executable, script, mode, directory], env=environment,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, code, result.stderr)
 
 
 if __name__ == "__main__":

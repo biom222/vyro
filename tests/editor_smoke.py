@@ -20,6 +20,10 @@ os.environ["DATABASE_URL"] = f"sqlite:///{(CHECK / 'check.sqlite3').as_posix()}"
 os.environ["OUTPUT_FOLDER"] = str(CHECK)
 os.environ["UPLOAD_FOLDER"] = str(CHECK / "uploads")
 os.environ["CACHE_FOLDER"] = str(CHECK / "cache")
+os.environ["DATA_FOLDER"] = str(CHECK / "data")
+os.environ["AI_PROVIDER"] = "mock"
+os.environ["TRANSCRIPTION_PROVIDER"] = "mock"
+os.environ["TRENDS_MOCK_MODE"] = "true"
 os.environ["TAISLY_API_KEY"] = ""
 
 from PyQt6.QtCore import QPoint, Qt
@@ -300,6 +304,26 @@ def main():
     assert editor.edit_widget.auto_subtitles.isChecked()
     assert editor.layers_widget.layers[0]["text"] == "Animated test title"
     assert editor.video_layers_widget.layers[0]["video_id"] == overlay_source
+    editor.shutdown_preview()
+    wait_for(lambda: not editor.is_busy())
+    window.publish_widget.title_edit.setText("Saved publication title")
+    window.publish_widget.description_edit.setPlainText("Saved publication description")
+    assert editor.save_project()
+    old_project_id = editor.project_id
+    with patch("gui.editor_workspace.QInputDialog.getText", return_value=("Independent smoke copy", True)):
+        editor.save_project_as()
+    wait_for(lambda: not editor.is_busy())
+    assert editor.project_id != old_project_id
+    assert editor.edit_widget.output_path is None
+    assert window.publish_widget.title_edit.text() == "Saved publication title"
+    assert len(editor.sequence_widget.clips) == 2
+    assert editor.layers_widget.layers[0]["text"] == "Animated test title"
+    assert editor.video_layers_widget.layers[0]["video_id"] != overlay_source
+    assert window.grab().save(str(CHECK / "project-copy.png"))
+    window.navigate("history")
+    QTest.qWait(100)
+    assert window.grab().save(str(CHECK / "history-copy.png"))
+    window.navigate("editor")
     editor.shutdown_preview()
     wait_for(lambda: not window.publish_widget.is_busy())
     if errors:
