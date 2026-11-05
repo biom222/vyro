@@ -149,8 +149,8 @@ class MainWindow(QMainWindow):
             self.toolbar.addAction(item)
             return item
 
-        action(file_menu, "Добавить видео", QStyle.StandardPixmap.SP_DialogOpenButton,
-               self._import_video, "Ctrl+O")
+        self.import_action = action(file_menu, "Добавить видео", QStyle.StandardPixmap.SP_DialogOpenButton,
+                                    self._import_video, "Ctrl+O")
         self.save_project_action = action(file_menu, "Сохранить проект", QStyle.StandardPixmap.SP_DialogSaveButton,
                                           self.editor_workspace.save_project, "Ctrl+S")
         file_menu.addAction("Открыть проект…").triggered.connect(lambda: self.navigate("history"))
@@ -177,6 +177,16 @@ class MainWindow(QMainWindow):
             ("Конец фрагмента в текущей позиции", lambda: self.editor_workspace._set_mark(False)),
         ):
             edit_menu.addAction(label).triggered.connect(callback)
+        edit_menu.addSeparator()
+        self.selection_actions = []
+        for label, callback in (
+            ("Предыдущий кадр (←)", lambda: self.editor_workspace.step_frame(-1)),
+            ("Следующий кадр (→)", lambda: self.editor_workspace.step_frame(1)),
+            ("Удалить выбранное (Delete)", self.editor_workspace.delete_selection),
+        ):
+            item = edit_menu.addAction(label)
+            item.triggered.connect(callback)
+            self.selection_actions.append(item)
 
         self.page_actions = {}
         group = QActionGroup(self)
@@ -210,12 +220,19 @@ class MainWindow(QMainWindow):
 
     def _sync_actions(self, *args) -> None:
         busy = self._media_busy or self.edit_widget.is_busy()
+        self.import_action.setEnabled(not busy)
+        self.export_action.setToolTip("Сначала добавьте видео" if self.edit_widget.video_id is None else
+                                     "Дождитесь завершения или отмените текущую обработку" if busy else "Экспорт MP4 (Ctrl+E)")
         self.save_project_action.setEnabled(self.editor_workspace.project_id is not None and not busy)
         self.save_project_as_action.setEnabled(self.save_project_action.isEnabled())
         self.export_action.setEnabled(self.edit_widget.video_id is not None and not busy)
         self.save_action.setEnabled(bool(self.edit_widget.output_path) and not busy)
         self.cancel_render_action.setVisible(busy)
         self.cancel_render_action.setEnabled(busy)
+        for item in self.selection_actions:
+            item.setEnabled(self.edit_widget.video_id is not None and not busy)
+        for button in (self.editor_workspace.previous_frame_button, self.editor_workspace.next_frame_button):
+            button.setEnabled(self.edit_widget.video_id is not None and not busy)
 
     def _media_busy_changed(self, busy: bool) -> None:
         self._media_busy = busy
@@ -316,5 +333,5 @@ class MainWindow(QMainWindow):
         if not self.editor_workspace.save_project():
             event.ignore()
             return
-        self.editor_workspace.player.stop()
+        self.editor_workspace.release_preview()
         event.accept()

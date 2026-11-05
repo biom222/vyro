@@ -7,7 +7,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QAbstractItemView, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-    QMessageBox, QPushButton, QTableView, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QTableView, QVBoxLayout, QWidget, QFormLayout,
 )
 from gui.worker import AudioImportWorker
 
@@ -21,7 +21,7 @@ class SequenceWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(245)
+        self.setMinimumHeight(100)
         self.clips: list[dict] = []
         self.primary_id: int | None = None
         self.music_path = ""
@@ -30,22 +30,26 @@ class SequenceWidget(QWidget):
         root.setContentsMargins(8, 6, 8, 6)
         root.setSpacing(5)
         controls = QHBoxLayout()
+        self.buttons = {}
         for label, handler in (("Добавить клип", self.add_requested.emit),
                                ("Просмотр сборки", self.preview_requested.emit),
                                ("Выше", lambda: self.move_selected(-1)),
                                ("Ниже", lambda: self.move_selected(1)),
                                ("Убрать", self.remove_selected)):
             button = QPushButton(label)
+            self.buttons[label] = button
             if label == "Просмотр сборки":
-                button.setToolTip("Непрерывный просмотр порядка и обрезки клипов. Переходы и музыка доступны после экспорта.")
+                button.setToolTip("Просмотр исходных обрезок по порядку. Для эффектов используйте «Просмотр с эффектами».")
+            if label == "Убрать":
+                self.remove_button = button
             button.clicked.connect(handler)
             controls.addWidget(button)
         controls.addStretch()
         root.addLayout(controls)
-        self.effect_preview_button = QPushButton("Просмотр с переходами и музыкой")
-        self.effect_preview_button.setToolTip("FFmpeg создаст временный прокси в cache/ с эффектами экспорта")
+        self.effect_preview_button = QPushButton("Просмотр с эффектами")
+        self.effect_preview_button.setToolTip("Подготовить просмотр переходов, музыки и слоёв. Первый запуск займёт время.")
         self.effect_preview_button.clicked.connect(self.effect_preview_requested.emit)
-        root.addWidget(self.effect_preview_button)
+        controls.addWidget(self.effect_preview_button)
         self.table = QTableView()
         self.model = QStandardItemModel(0, 4, self)
         self.model.setHorizontalHeaderLabels(["Клип", "Начало", "Конец", "Длительность"])
@@ -56,15 +60,20 @@ class SequenceWidget(QWidget):
         self.table.verticalHeader().hide()
         self.table.setShowGrid(False)
         self.table.setMinimumHeight(80)
-        self.table.setMaximumHeight(88)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for column in (1, 2, 3):
             self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         self.table.selectionModel().currentRowChanged.connect(
             lambda current, _previous: self._select_row(current.row()))
         root.addWidget(self.table, 1)
-        detail = QHBoxLayout()
-        detail.addWidget(QLabel("Выбранный клип:"))
+        self.properties = QWidget()
+        details = QVBoxLayout(self.properties)
+        details.setContentsMargins(8, 8, 8, 8)
+        self.selection_label = QLabel("Выберите клип в сборке")
+        self.selection_label.setWordWrap(True)
+        details.addWidget(self.selection_label)
+        detail = QFormLayout()
+        detail.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         self.start_spin = QDoubleSpinBox()
         self.end_spin = QDoubleSpinBox()
         for spin in (self.start_spin, self.end_spin):
@@ -73,47 +82,40 @@ class SequenceWidget(QWidget):
             spin.setSingleStep(0.1)
             spin.setSuffix(" сек.")
             spin.valueChanged.connect(self._trim_changed)
-        detail.addWidget(QLabel("От"))
-        detail.addWidget(self.start_spin)
-        detail.addWidget(QLabel("До"))
-        detail.addWidget(self.end_spin)
-        detail.addStretch()
-        root.addLayout(detail)
-        transition_row = QHBoxLayout()
-        transition_row.addWidget(QLabel("Переход"))
+        detail.addRow("Начало в исходнике", self.start_spin)
+        detail.addRow("Конец в исходнике", self.end_spin)
         self.transition = QComboBox()
         self.transition.addItem("Склейка", "cut")
         self.transition.addItem("Растворение", "dissolve")
         self.transition.currentIndexChanged.connect(self.changed.emit)
-        transition_row.addWidget(self.transition)
-        transition_row.addWidget(QLabel("Длительность"))
+        detail.addRow("Переходы между клипами", self.transition)
         self.transition_duration = QDoubleSpinBox()
         self.transition_duration.setRange(0.1, 2.0)
         self.transition_duration.setValue(0.5)
         self.transition_duration.setSingleStep(0.1)
         self.transition_duration.setSuffix(" сек.")
         self.transition_duration.valueChanged.connect(self.changed.emit)
-        transition_row.addWidget(self.transition_duration)
-        transition_row.addStretch()
-        root.addLayout(transition_row)
-        music = QHBoxLayout()
+        detail.addRow("Длительность перехода", self.transition_duration)
         self.music_button = QPushButton("Музыка…")
         self.music_button.clicked.connect(self.choose_music)
-        music.addWidget(self.music_button)
+        detail.addRow("Музыка сборки", self.music_button)
         self.music_label = QLabel("Без музыки")
         self.music_label.setObjectName("muted")
-        music.addWidget(self.music_label, 1)
+        self.music_label.setWordWrap(True)
+        detail.addRow(self.music_label)
         clear = QPushButton("Убрать музыку")
         clear.clicked.connect(lambda: self.set_music(""))
-        music.addWidget(clear)
-        music.addWidget(QLabel("Громкость"))
+        detail.addRow(clear)
         self.music_volume = QDoubleSpinBox()
         self.music_volume.setRange(0, 100)
         self.music_volume.setValue(25)
         self.music_volume.setSuffix(" %")
         self.music_volume.valueChanged.connect(self.changed.emit)
-        music.addWidget(self.music_volume)
-        root.addLayout(music)
+        detail.addRow("Громкость музыки", self.music_volume)
+        details.addLayout(detail)
+        details.addStretch()
+        self.transition.currentIndexChanged.connect(self._transition_state)
+        self._transition_state()
         self._select_row(-1)
 
     def set_clips(self, primary_id: int, clips: list[dict], music_path: str = "", music_volume: float = 0.25,
@@ -129,6 +131,7 @@ class SequenceWidget(QWidget):
         self.transition.blockSignals(True)
         self.transition.setCurrentIndex(max(0, self.transition.findData(transition)))
         self.transition.blockSignals(False)
+        self._transition_state()
         self.transition_duration.blockSignals(True)
         self.transition_duration.setValue(transition_duration)
         self.transition_duration.blockSignals(False)
@@ -157,6 +160,18 @@ class SequenceWidget(QWidget):
 
     def _select_row(self, row: int) -> None:
         active = 0 <= row < len(self.clips)
+        self.selection_label.setText(f"Клип {row + 1}: {self.clips[row]['name']}" if active else "Выберите клип в сборке")
+        removable = active and self.clips[row]["video_id"] != self.primary_id
+        self.remove_button.setEnabled(removable)
+        self.remove_button.setToolTip("Убрать из сборки (Delete); файл останется в медиатеке" if removable else "Основной клип проекта нельзя убрать")
+        for label in ("Добавить клип", "Просмотр сборки"):
+            self.buttons[label].setEnabled(bool(self.clips))
+            self.buttons[label].setToolTip("Сначала добавьте видео" if not self.clips else
+                "Добавить исходник в текущую сборку" if label == "Добавить клип" else
+                "Просмотр обрезок по порядку; переходы и слои — через просмотр с эффектами")
+        self.buttons["Выше"].setEnabled(active and row > 0)
+        self.buttons["Ниже"].setEnabled(active and row < len(self.clips)-1)
+        self.effect_preview_button.setEnabled(bool(self.clips))
         for spin in (self.start_spin, self.end_spin):
             spin.setEnabled(active)
         if active:
@@ -170,6 +185,10 @@ class SequenceWidget(QWidget):
             self.start_spin.blockSignals(False)
             self.end_spin.blockSignals(False)
             self.selected.emit(row)
+
+    def _transition_state(self) -> None:
+        self.transition_duration.setEnabled(self.transition.currentData() == "dissolve")
+        self.transition_duration.setToolTip("Длительность общая для всех переходов" if self.transition_duration.isEnabled() else "Доступно для растворения")
 
     def _trim_changed(self) -> None:
         row = self.table.currentIndex().row()
@@ -253,7 +272,7 @@ class SequenceWidget(QWidget):
 
     def set_effect_preview_active(self, active: bool) -> None:
         self.effect_preview_button.setText(
-            "Вернуться к исходникам" if active else "Просмотр с переходами и музыкой"
+            "Вернуться к исходникам" if active else "Просмотр с эффектами"
         )
 
     def set_music(self, path: str) -> None:

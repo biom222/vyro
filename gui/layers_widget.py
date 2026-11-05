@@ -29,9 +29,11 @@ class LayersWidget(QWidget):
         title_row.addWidget(QLabel("Титры (до 8 слоёв)"))
         title_row.addStretch()
         add = QPushButton("Добавить титр")
+        self.add_button = add
         add.clicked.connect(self.add_title)
         title_row.addWidget(add)
         remove = QPushButton("Удалить")
+        self.remove_button = remove
         remove.clicked.connect(self.remove_selected)
         title_row.addWidget(remove)
         root.addLayout(title_row)
@@ -52,44 +54,49 @@ class LayersWidget(QWidget):
         self.table.selectionModel().currentRowChanged.connect(lambda current, _: self._select_layer(current.row()))
         root.addWidget(self.table, 1)
 
+        self.properties = QWidget()
+        details = QVBoxLayout(self.properties)
+        details.setContentsMargins(8, 8, 8, 8)
+        self.selection_label = QLabel("Выберите титр на шкале или в таблице")
+        self.selection_label.setWordWrap(True)
+        details.addWidget(self.selection_label)
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         self.text = QLineEdit()
         self.text.setPlaceholderText("Текст титра")
         self.text.textChanged.connect(self._layer_changed)
         form.addRow("Текст", self.text)
-        time_row = QHBoxLayout()
         self.start = self._time_spin()
         self.end = self._time_spin()
         self.start.valueChanged.connect(self._layer_changed)
         self.end.valueChanged.connect(self._layer_changed)
-        time_row.addWidget(QLabel("От"))
-        time_row.addWidget(self.start)
-        time_row.addWidget(QLabel("До"))
-        time_row.addWidget(self.end)
+        form.addRow("Начало в сборке", self.start)
+        form.addRow("Конец в сборке", self.end)
         self.size = QSpinBox()
         self.size.setRange(16, 160)
         self.size.setValue(64)
         self.size.valueChanged.connect(self._layer_changed)
-        time_row.addWidget(QLabel("Размер"))
-        time_row.addWidget(self.size)
+        form.addRow("Размер", self.size)
         self.color = QComboBox()
         for label, value in (("Белый", "white"), ("Жёлтый", "yellow"), ("Голубой", "#69c0ff")):
             self.color.addItem(label, value)
         self.color.currentIndexChanged.connect(self._layer_changed)
-        time_row.addWidget(self.color)
-        form.addRow("Время", time_row)
-        root.addLayout(form)
+        form.addRow("Цвет", self.color)
+        details.addLayout(form)
 
         key_row = QHBoxLayout()
-        key_row.addWidget(QLabel("Ключевые кадры: время, положение и прозрачность"))
-        key_row.addStretch()
-        add_key = QPushButton("Добавить кадр")
+        key_label = QLabel("Ключевые кадры · время сборки")
+        key_label.setWordWrap(True)
+        details.addWidget(key_label)
+        add_key = QPushButton("Добавить")
+        self.add_key_button = add_key
         add_key.clicked.connect(self.add_keyframe)
         key_row.addWidget(add_key)
-        remove_key = QPushButton("Удалить кадр")
+        remove_key = QPushButton("Удалить")
+        self.remove_key_button = remove_key
         remove_key.clicked.connect(self.remove_keyframe)
         key_row.addWidget(remove_key)
-        root.addLayout(key_row)
+        details.addLayout(key_row)
         self.key_table = QTableView()
         self.key_model = QStandardItemModel(0, 4, self)
         self.key_model.setHorizontalHeaderLabels(["Сек.", "X %", "Y %", "Непрозр. %"])
@@ -102,20 +109,20 @@ class LayersWidget(QWidget):
         self.key_table.setMinimumHeight(65)
         self.key_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.key_table.selectionModel().currentRowChanged.connect(lambda current, _: self._select_keyframe(current.row()))
-        root.addWidget(self.key_table, 1)
+        self.key_table.setMinimumHeight(100)
+        details.addWidget(self.key_table)
 
-        values = QHBoxLayout()
+        values = QFormLayout()
         self.key_time = self._time_spin()
         self.key_x = self._percent_spin(50)
         self.key_y = self._percent_spin(80)
         self.key_opacity = self._percent_spin(100)
         for label, spin in (("Время", self.key_time), ("X", self.key_x),
                             ("Y", self.key_y), ("Непрозрачность", self.key_opacity)):
-            values.addWidget(QLabel(label))
-            values.addWidget(spin)
+            values.addRow(label, spin)
             spin.valueChanged.connect(self._keyframe_changed)
-        values.addStretch()
-        root.addLayout(values)
+        details.addLayout(values)
+        details.addStretch()
         self._select_layer(-1)
 
     @staticmethod
@@ -139,6 +146,8 @@ class LayersWidget(QWidget):
         was_loading = self._loading
         self._loading = True
         self.duration = max(0.0, float(duration))
+        self.add_button.setEnabled(self.duration >= 0.1 and len(self.layers) < 8)
+        self.add_button.setToolTip("Добавить титр" if self.duration >= 0.1 else "Сначала добавьте видео")
         if self.duration < 0.1:
             self.layers.clear()
         else:
@@ -196,6 +205,11 @@ class LayersWidget(QWidget):
 
     def _select_layer(self, row: int) -> None:
         active = 0 <= row < len(self.layers)
+        self.add_button.setEnabled(self.duration >= 0.1 and len(self.layers) < 8)
+        self.remove_button.setEnabled(active)
+        self.add_key_button.setEnabled(active)
+        self.remove_key_button.setEnabled(active)
+        self.selection_label.setText(f"Титр {row + 1} · время сборки" if active else "Выберите титр на шкале или в таблице")
         was_loading = self._loading
         self._loading = True
         for widget in (self.text, self.start, self.end, self.size, self.color, self.key_table,
@@ -252,6 +266,9 @@ class LayersWidget(QWidget):
         if not 0 <= layer_row < len(self.layers):
             return
         keys = self.layers[layer_row]["keyframes"]
+        self.add_key_button.setEnabled(len(keys) < 20)
+        self.remove_key_button.setEnabled(len(keys) > 1)
+        self.remove_key_button.setToolTip("Титру нужен хотя бы один ключевой кадр" if len(keys) == 1 else "Удалить выбранный ключевой кадр")
         if not 0 <= row < len(keys):
             return
         key = keys[row]

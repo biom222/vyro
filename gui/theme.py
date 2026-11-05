@@ -49,6 +49,8 @@ def set_flat_icon(target, standard_pixmap):
         for y in (4, 9, 14):
             painter.drawRect(QRectF(3, y, 2, 2))
             painter.drawLine(8, y + 1, 17, y + 1)
+    elif standard_pixmap == QStyle.StandardPixmap.SP_MediaStop:
+        painter.drawRect(QRectF(4, 4, 12, 12))
     painter.end()
     target.setIcon(QIcon(pixmap))
 
@@ -121,6 +123,7 @@ QPushButton, QToolButton {{ background: {control}; border: 0; border-radius: 2px
 QPushButton:hover, QToolButton:hover {{ background: {edge}; }}
 QPushButton:pressed, QToolButton:pressed, QToolButton:checked {{ background: {ACCENT}; color: white; }}
 QPushButton#primaryButton {{ background: {ACCENT}; color: white; }}
+QPushButton#primaryButton:disabled {{ color: {muted}; background: {bg}; }}
 QPushButton:disabled, QToolButton:disabled {{ color: {muted}; background: {bg}; }}
 QPushButton#transportButton, QPushButton#playButton {{ padding: 2px; min-height: 18px; }}
 QLineEdit, QTextEdit, QAbstractSpinBox, QComboBox {{ background: {surface}; border: 1px solid {edge}; border-radius: 2px; padding: 3px; selection-background-color: {ACCENT}; }}

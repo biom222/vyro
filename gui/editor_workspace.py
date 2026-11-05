@@ -5,8 +5,8 @@ import copy
 import logging
 
 from sqlalchemy.exc import SQLAlchemyError
-from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QImage, QKeySequence, QShortcut
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal, QEvent
+from PyQt6.QtGui import QImage
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PyQt6.QtWidgets import (
     QFrame,
@@ -23,13 +23,14 @@ from PyQt6.QtWidgets import (
     QTabWidget,
     QVBoxLayout,
     QWidget,
+    QStackedWidget, QApplication, QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox,
 )
 
 from app.services.projects import create_project_for_video, add_video_to_project
 from app.services.project_state import load_project_state, save_project_state, ProjectStateError
 from app.models import AppPreference, SessionLocal, Video
 from gui.edit_widget import EditWidget
-from gui.timeline_widget import TimelineWidget
+from gui.timeline_widget import TimelineWidget, CompositionTimeline
 from gui.upload_widget import UploadWidget
 from gui.worker import PreviewFrameWorker, PreviewRenderWorker
 from gui.preview_canvas import PreviewCanvas
@@ -59,6 +60,8 @@ class EditorWorkspace(QWidget):
         self._generation = 0
         self._player_failed = False
         self._last_frame_time = None
+        self._media_timing = {}
+        self._closing = False
         self._append_next_video = False
         self._restoring_sequence = False
         self._sequence_playback = False
@@ -104,13 +107,13 @@ class EditorWorkspace(QWidget):
         self.vertical_splitter = vertical_splitter
         vertical_splitter.setChildrenCollapsible(False)
         workspace = QSplitter(Qt.Orientation.Horizontal)
+        self.workspace_splitter = workspace
         workspace.setChildrenCollapsible(False)
 
         self.upload_widget = UploadWidget()
         self.media_scroll = QScrollArea()
         self.media_scroll.setWidgetResizable(True)
         self.media_scroll.setMinimumWidth(160)
-        self.media_scroll.setMaximumWidth(225)
         self.media_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.media_scroll.setWidget(self.upload_widget)
         workspace.addWidget(self.media_scroll)
@@ -119,9 +122,10 @@ class EditorWorkspace(QWidget):
         preview_panel.setObjectName("previewPanel")
         preview_layout = QVBoxLayout(preview_panel)
         preview_layout.setContentsMargins(8, 8, 8, 8)
-        preview_layout.setSpacing(8)
+        preview_layout.setSpacing(4)
         preview_header = QHBoxLayout()
-        preview_title = QLabel("ПРОСМОТР")
+        preview_title = QLabel("ИСХОДНИК · кадрирование и текст")
+        self.preview_title = preview_title
         preview_title.setObjectName("panelEyebrow")
         self.preview_status = QLabel("Нет медиа")
         self.preview_status.setObjectName("muted")
@@ -130,6 +134,7 @@ class EditorWorkspace(QWidget):
         preview_layout.addLayout(preview_header)
 
         self.canvas = PreviewCanvas()
+        self.canvas.setMinimumHeight(96)
         preview_layout.addWidget(self.canvas, 1)
 
         self.audio_output = QAudioOutput(self)
@@ -146,18 +151,22 @@ class EditorWorkspace(QWidget):
         self.player.mediaStatusChanged.connect(self._media_status_changed)
 
         controls = QHBoxLayout()
-        jump_start = self._transport_button("", lambda: self.seek_seconds(self.edit_widget.start_time.value()))
+        jump_start = self._transport_button("", lambda: self.seek_seconds(0 if self._effect_preview_active else self.edit_widget.start_time.value()))
         set_flat_icon(jump_start, QStyle.StandardPixmap.SP_MediaSkipBackward)
         back = self._transport_button("−5", lambda: self.seek_seconds(self.player.position() / 1000 - 5))
+        self.previous_frame_button = self._transport_button("<", lambda: self.step_frame(-1))
+        self.next_frame_button = self._transport_button(">", lambda: self.step_frame(1))
+        self.previous_frame_button.setToolTip("Предыдущий кадр (←)")
+        self.next_frame_button.setToolTip("Следующий кадр (→)")
         self.play_button = self._transport_button("", self.toggle_playback)
         set_flat_icon(self.play_button, QStyle.StandardPixmap.SP_MediaPlay)
         self.play_button.setObjectName("playButton")
         forward = self._transport_button("+5", lambda: self.seek_seconds(self.player.position() / 1000 + 5))
-        jump_end = self._transport_button("", lambda: self.seek_seconds(self.edit_widget.end_time.value()))
+        jump_end = self._transport_button("", lambda: self.seek_seconds(self.timeline.duration if self._effect_preview_active else self.edit_widget.end_time.value()))
         set_flat_icon(jump_end, QStyle.StandardPixmap.SP_MediaSkipForward)
-        self.time_label = QLabel("00:00.0 / 00:00.0")
+        self.time_label = QLabel("00:00.000 / 00:00.000")
         self.time_label.setObjectName("timecode")
-        for button in (jump_start, back, self.play_button, forward, jump_end):
+        for button in (jump_start, back, self.previous_frame_button, self.play_button, self.next_frame_button, forward, jump_end):
             controls.addWidget(button)
         preview_layout.addLayout(controls)
         self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -166,13 +175,19 @@ class EditorWorkspace(QWidget):
         workspace.addWidget(preview_panel)
 
         self.edit_widget = EditWidget()
+        self.sequence_widget = SequenceWidget()
+        self.layers_widget = LayersWidget()
+        self.video_layers_widget = VideoLayersWidget()
         toolbar.addWidget(self.edit_widget.render_button)
         self.inspector_scroll = QScrollArea()
         self.inspector_scroll.setWidgetResizable(True)
         self.inspector_scroll.setMinimumWidth(280)
-        self.inspector_scroll.setMaximumWidth(315)
         self.inspector_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.inspector_scroll.setWidget(self.edit_widget)
+        self.inspector_pages = QStackedWidget()
+        for page in (self.edit_widget, self.sequence_widget.properties, self.layers_widget.properties,
+                     self.video_layers_widget.properties):
+            self.inspector_pages.addWidget(page)
+        self.inspector_scroll.setWidget(self.inspector_pages)
         workspace.addWidget(self.inspector_scroll)
         workspace.setStretchFactor(0, 0)
         workspace.setStretchFactor(1, 1)
@@ -207,15 +222,19 @@ class EditorWorkspace(QWidget):
         timeline_toolbar.addWidget(set_in)
         timeline_toolbar.addWidget(set_out)
         timeline_layout.addLayout(timeline_toolbar)
+        self.composition = CompositionTimeline()
+        self.composition_scroll = QScrollArea()
+        self.composition_scroll.setWidgetResizable(True)
+        self.composition_scroll.setFixedHeight(148)
+        self.composition_scroll.setWidget(self.composition)
+        self.composition_scroll.hide()
+        timeline_layout.addWidget(self.composition_scroll)
         self.timeline = TimelineWidget()
         self.timeline_scroll = QScrollArea()
         self.timeline_scroll.setWidgetResizable(True)
         self.timeline_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.timeline_scroll.setMinimumHeight(195)
         self.timeline_scroll.setWidget(self.timeline)
-        self.sequence_widget = SequenceWidget()
-        self.layers_widget = LayersWidget()
-        self.video_layers_widget = VideoLayersWidget()
         self.sequence_scroll = QScrollArea()
         self.sequence_scroll.setWidgetResizable(True)
         self.sequence_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -232,6 +251,11 @@ class EditorWorkspace(QWidget):
         vertical_splitter.setStretchFactor(1, 0)
         vertical_splitter.setSizes([560, 190])
         root.addWidget(vertical_splitter, 1)
+        export_status = QHBoxLayout()
+        for widget in (self.edit_widget.progress, self.edit_widget.cancel_button,
+                       self.edit_widget.save_button, self.edit_widget.publish_button):
+            export_status.addWidget(widget, 1 if widget is self.edit_widget.progress else 0)
+        root.addLayout(export_status)
 
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -247,6 +271,12 @@ class EditorWorkspace(QWidget):
         self.sequence_widget.changed.connect(self._sequence_changed)
         self.layers_widget.changed.connect(self._mark_modified)
         self.video_layers_widget.changed.connect(self._mark_modified)
+        self.sequence_widget.changed.connect(self._refresh_composition)
+        self.layers_widget.changed.connect(self._refresh_composition)
+        self.video_layers_widget.changed.connect(self._refresh_composition)
+        self.composition.selected.connect(self._select_composition_item)
+        self.composition.seek_requested.connect(self.seek_composition)
+        self.sequence_widget.selected.connect(self._select_composition_clip)
         self.edit_widget.sequence_provider = self._project_render_params
         self.upload_widget.existing_selected.connect(self.open_existing)
         self.upload_widget.log_message.connect(self.log_message.emit)
@@ -269,19 +299,23 @@ class EditorWorkspace(QWidget):
         self.timeline.position_changed.connect(self._timeline_seek)
         self.timeline.range_changed.connect(self._timeline_range_changed)
         self.shortcuts = []
-        for key, callback in (("Space", self.toggle_playback), ("I", lambda: self._set_mark(True)), ("O", lambda: self._set_mark(False))):
-            shortcut = QShortcut(QKeySequence(key), self.canvas)
-            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            shortcut.activated.connect(callback)
-            self.shortcuts.append(shortcut)
+        QApplication.instance().installEventFilter(self)
         self.canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.play_button.setEnabled(False)
+        self.play_button.setToolTip("Пробел — воспроизведение; сначала добавьте видео")
+        self.workspace_splitter.splitterMoved.connect(self._schedule_draft_save)
+        self.vertical_splitter.splitterMoved.connect(self._schedule_draft_save)
+        self.zoom_combo.currentIndexChanged.connect(self._schedule_draft_save)
+        self.editor_tabs.currentChanged.connect(self._schedule_draft_save)
+        for kind, table in (("title", self.layers_widget.table), ("overlay", self.video_layers_widget.table)):
+            table.selectionModel().currentRowChanged.connect(
+                lambda current, previous, key=kind: self._highlight_layer(key, current.row()))
 
     @staticmethod
     def _transport_button(text: str, callback) -> QPushButton:
         button = QPushButton(text)
         button.setObjectName("transportButton")
-        button.setFixedSize(42, 34)
+        button.setFixedSize(36, 28)
         button.clicked.connect(callback)
         return button
 
@@ -289,16 +323,136 @@ class EditorWorkspace(QWidget):
         factor = self.zoom_combo.currentData() or 1
         width = self.timeline_scroll.viewport().width()
         self.timeline.setMinimumWidth(round(width * factor) if factor > 1 else 0)
+        self.composition.setMinimumWidth(round(self.composition_scroll.viewport().width() * factor) if factor > 1 else 0)
         QTimer.singleShot(0, self._scroll_to_playhead)
 
     def _scroll_to_playhead(self) -> None:
         self.timeline_scroll.ensureVisible(round(self.timeline._x_for_time(self.timeline.position)), 60, 60, 0)
+        self.composition_scroll.ensureVisible(round(self.composition._x_for_time(self.composition.position)), 50, 40, 0)
 
     def _editor_tab_changed(self, index: int) -> None:
-        if index in (1, 2, 3):
-            self.vertical_splitter.setSizes([320, 470])
+        self.inspector_pages.setCurrentIndex(index)
+        self.inspector_scroll.verticalScrollBar().setValue(0)
+        self.composition_scroll.setVisible(index != 0)
+        table = (self.sequence_widget.table, self.sequence_widget.table,
+                 self.layers_widget.table, self.video_layers_widget.table)[index]
+        self.composition.selection = (("video", "video", "title", "overlay")[index], table.currentIndex().row())
+        self._refresh_composition()
+        QTimer.singleShot(0, self._zoom_timeline)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "composition_scroll"):
+            QTimer.singleShot(0, self._zoom_timeline)
+
+    def _refresh_composition(self) -> None:
+        self.composition.set_project(self.sequence_widget.clips, self.layers_widget.layers,
+                                     self.video_layers_widget.layers, self.sequence_widget.music_path,
+                                     self.sequence_widget.transition.currentData(),
+                                     self.sequence_widget.transition_duration.value())
+
+    def _select_composition_clip(self, index: int) -> None:
+        self.composition.selection = ("video", index)
+        self._refresh_composition()
+
+    def _highlight_layer(self, kind: str, index: int) -> None:
+        if self.editor_tabs.currentIndex() == {"title": 2, "overlay": 3}[kind]:
+            self.composition.selection = (kind, index)
+            self.composition.update()
+
+    def _select_composition_item(self, kind: str, index: int) -> None:
+        if self.edit_widget.is_busy() or self._effect_preview_worker:
+            return
+        page = {"video": 1, "title": 2, "overlay": 3, "music": 1}[kind]
+        self.editor_tabs.setCurrentIndex(page)
+        table = {"video": self.sequence_widget.table, "title": self.layers_widget.table,
+                 "overlay": self.video_layers_widget.table}.get(kind)
+        if table is not None:
+            table.selectRow(index)
+        self.composition.selection = (kind, index)
+        self.composition.update()
+
+    def seek_composition(self, seconds: float) -> None:
+        if self._effect_preview_active:
+            self.seek_seconds(seconds)
+            return
+        clips = [item for item in self.composition.items if item[0] == "video"]
+        if not clips:
+            return
+        item = next((item for item in reversed(clips) if item[2] <= seconds < item[3]), clips[-1])
+        self.sequence_widget.table.selectRow(item[1])
+        clip = self.sequence_widget.clips[item[1]]
+        self.seek_seconds(clip["start_time"] + min(seconds - item[2], clip["end_time"] - clip["start_time"]))
+
+    def eventFilter(self, watched, event) -> bool:
+        if (event.type() != QEvent.Type.KeyPress or self._closing or not self.isVisible()
+                or QApplication.activeModalWidget() or QApplication.activePopupWidget()):
+            return super().eventFilter(watched, event)
+        focus = QApplication.focusWidget()
+        if focus is None or not self.isAncestorOf(focus):
+            return False
+        if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox)):
+            return False
+        if self.edit_widget.is_busy() or self._effect_preview_worker:
+            return False
+        key, modifiers = event.key(), event.modifiers()
+        if modifiers == Qt.KeyboardModifier.ShiftModifier and key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            self.seek_seconds(self.timeline.position + (-5 if key == Qt.Key.Key_Left else 5))
+        elif modifiers != Qt.KeyboardModifier.NoModifier:
+            return False
+        elif key == Qt.Key.Key_Space:
+            self.toggle_playback()
+        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            self.step_frame(-1 if key == Qt.Key.Key_Left else 1)
+        elif key in (Qt.Key.Key_I, Qt.Key.Key_O) and not self._effect_preview_active:
+            self._set_mark(key == Qt.Key.Key_I)
+        elif key == Qt.Key.Key_Delete and not self.upload_widget.isAncestorOf(focus):
+            self.delete_selection()
         else:
-            self.vertical_splitter.setSizes([560, 190])
+            return False
+        event.accept()
+        return True
+
+    def delete_selection(self) -> None:
+        if self.edit_widget.is_busy() or self._effect_preview_worker or self._effect_preview_active:
+            return
+        page = self.editor_tabs.currentIndex()
+        if page == 2:
+            if self.layers_widget.key_table.hasFocus():
+                self.layers_widget.remove_keyframe()
+            else:
+                self.layers_widget.remove_selected()
+        elif page == 3:
+            self.video_layers_widget.remove_selected()
+        else:
+            row = self.sequence_widget.table.currentIndex().row()
+            if 0 <= row < len(self.sequence_widget.clips) and self.sequence_widget.clips[row]["video_id"] == self.video_id:
+                self.preview_status.setText("Основной клип проекта нельзя убрать")
+            else:
+                self.sequence_widget.remove_selected()
+
+    def _media_timing_ready(self, path: str, fps: float, variable: bool) -> None:
+        self._media_timing[path] = (fps, variable)
+        if path == self.source_path:
+            note = f"{'Приблизительный шаг VFR' if variable else 'Шаг кадра'}: {1/fps:.4f} с ({fps:.3f} FPS)"
+            self.previous_frame_button.setToolTip("← · " + note)
+            self.next_frame_button.setToolTip("→ · " + note)
+
+    def step_frame(self, direction: int) -> None:
+        if not self.source_path or self.edit_widget.is_busy() or self._effect_preview_worker:
+            return
+        timing = self._media_timing.get(self.source_path)
+        if timing is None:
+            self.preview_status.setText("Определяется частота кадров — повторите после загрузки кадра")
+            self.request_preview(self.timeline.position)
+            return
+        fps, variable = timing
+        frame = round(self.timeline.position * fps) + direction
+        last = max(0, int(self.timeline.duration * fps - 0.001))
+        self.seek_seconds(max(0, min(last, frame)) / fps)
+        self._scroll_to_playhead()
+        if variable:
+            self.preview_status.setText("VFR: шаг по средней частоте; границы кадров приблизительные")
 
     def _on_video_ready(
         self, video_id: int, duration: float, width: int, height: int, source_path: str
@@ -358,12 +512,25 @@ class EditorWorkspace(QWidget):
         self.layers_widget.setEnabled(not busy)
         self.video_layers_widget.setEnabled(not busy)
         self.ai_button.setEnabled(not busy and self.video_id is not None)
+        self.inspector_pages.setEnabled(not busy)
+        self.composition_scroll.setEnabled(not busy)
         self.processing_changed.emit(busy)
 
     def shutdown_preview(self) -> None:
         self._preview_timer.stop()
         self._pending_preview_time = None
         self.player.stop()
+
+    def release_preview(self) -> None:
+        """Detach Qt Multimedia before QApplication destroys platform resources."""
+        self._closing = True
+        QApplication.instance().removeEventFilter(self)
+        self.shutdown_preview()
+        self.source_path = None
+        self.player.setVideoSink(None)
+        self.player.setAudioOutput(None)
+        self.player.setSource(QUrl())
+        self._draft_timer.stop()
 
     def _on_render_completed(self, video_id: int, output_path: str, duration: float) -> None:
         self._draft_dirty = False
@@ -464,6 +631,7 @@ class EditorWorkspace(QWidget):
         self._preview_sequence_clip(self.sequence_widget.table.currentIndex().row())
         if "playhead" in sequence_saved:
             self.seek_seconds(float(sequence_saved["playhead"]))
+        self._restore_layout(sequence_saved.get("workspace", {}))
         if missing:
             QMessageBox.warning(self, "Файлы недоступны", "Некоторые файлы проекта не найдены:\n" + "\n".join(missing[:5]))
         if video.output_path and Path(video.output_path).is_file() and video.status == "ready" and not self._draft_dirty:
@@ -544,6 +712,7 @@ class EditorWorkspace(QWidget):
             self._sequence_playback = False
             self.player.pause()
         clip = self.sequence_widget.clips[index]
+        self.preview_title.setText("ИСХОДНИК · кадрирование и текст")
         with SessionLocal() as session:
             video = session.get(Video, clip["video_id"])
             if video is None:
@@ -645,6 +814,7 @@ class EditorWorkspace(QWidget):
         self._preview_sequence_clip(self._effect_restore_index)
 
     def _effect_preview_ready(self, path: str, duration: float) -> None:
+        self.preview_title.setText("СБОРКА С ЭФФЕКТАМИ")
         self._effect_preview_active = True
         self._effect_preview_path = path
         self.sequence_widget.set_effect_preview_active(True)
@@ -684,6 +854,7 @@ class EditorWorkspace(QWidget):
         if not self._effect_preview_active:
             return
         self.player.stop()
+        self.preview_title.setText("ИСХОДНИК · кадрирование и текст")
         self._effect_preview_active = False
         self.sequence_widget.set_effect_preview_active(False)
         self.canvas.caption = self.edit_widget.subtitle_edit.text()
@@ -755,7 +926,28 @@ class EditorWorkspace(QWidget):
                  "active_index": max(0, self.sequence_widget.table.currentIndex().row()),
                  "playhead": self.player.position() / 1000,
                  "publication": copy.deepcopy(self.publication_draft),
+                 "workspace": {"horizontal": self.workspace_splitter.sizes(),
+                               "vertical": self.vertical_splitter.sizes(),
+                               "tab": self.editor_tabs.currentIndex(), "zoom": self.zoom_combo.currentData(),
+                               "title_index": self.layers_widget.table.currentIndex().row(),
+                               "overlay_index": self.video_layers_widget.table.currentIndex().row()},
                  "dirty": self._draft_dirty}
+
+    def _restore_layout(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            return
+        for key, splitter, count in (("horizontal", self.workspace_splitter, 3), ("vertical", self.vertical_splitter, 2)):
+            values = state.get(key)
+            if isinstance(values, list) and len(values) == count and all(type(x) is int and 0 <= x <= 100000 for x in values) and sum(values):
+                splitter.setSizes(values)
+        tab = state.get("tab", 0)
+        if type(tab) is int and 0 <= tab <= 3:
+            self.editor_tabs.setCurrentIndex(tab)
+        self.zoom_combo.setCurrentIndex(max(0, self.zoom_combo.findData(state.get("zoom", 1))))
+        for key, table in (("title_index", self.layers_widget.table), ("overlay_index", self.video_layers_widget.table)):
+            index = state.get(key, 0)
+            if type(index) is int and 0 <= index < table.model().rowCount():
+                table.selectRow(index)
 
     def _sequence_duration(self) -> float:
         clips = self.sequence_widget.clips
@@ -856,6 +1048,13 @@ class EditorWorkspace(QWidget):
     def _position_changed(self, position: int) -> None:
         seconds = position / 1000
         self.timeline.set_position(seconds)
+        if self._effect_preview_active:
+            self.composition.set_position(seconds)
+        else:
+            index = self.sequence_widget.table.currentIndex().row()
+            item = next((item for item in self.composition.items if item[:2] == ("video", index)), None)
+            if item is not None:
+                self.composition.set_position(item[2] + seconds - self.sequence_widget.clips[index]["start_time"])
         self.time_label.setText(
             f"{self._format_time(seconds)} / {self._format_time(self.player.duration() / 1000)}"
         )
@@ -898,7 +1097,7 @@ class EditorWorkspace(QWidget):
     def request_preview(self, seconds: float) -> None:
         if not self.source_path:
             return
-        self._pending_preview_time = min(max(0.0, seconds), max(0.0, self.timeline.duration - 0.1))
+        self._pending_preview_time = min(max(0.0, seconds), max(0.0, self.timeline.duration - 0.001))
         self._preview_timer.start()
 
     def _start_preview_request(self) -> None:
@@ -907,6 +1106,8 @@ class EditorWorkspace(QWidget):
         seconds = self._pending_preview_time
         self._pending_preview_time = None
         self._preview_worker = PreviewFrameWorker(self.source_path, seconds, self)
+        self._preview_worker.inspect_timing = self.source_path not in self._media_timing
+        self._preview_worker.timing.connect(self._media_timing_ready)
         self._preview_worker.generation = self._generation
         self._preview_worker.succeeded.connect(self._preview_succeeded)
         self._preview_worker.error.connect(self._preview_failed)
@@ -960,11 +1161,11 @@ class EditorWorkspace(QWidget):
 
     def _update_selection_label(self, start: float, end: float) -> None:
         self.selection_label.setText(
-            f"Выделение: {self._format_time(start)} — {self._format_time(end)} · {end - start:.1f} сек."
+            f"Исходник: {self._format_time(start)} — {self._format_time(end)} · {end - start:.1f} сек."
         )
 
     def _set_mark(self, is_start: bool) -> None:
-        if self.edit_widget.is_busy():
+        if self.edit_widget.is_busy() or self._effect_preview_worker or self._effect_preview_active:
             return
         value = self.player.position() / 1000
         start = self.edit_widget.start_time.value()
@@ -993,7 +1194,7 @@ class EditorWorkspace(QWidget):
     def _format_time(seconds: float) -> str:
         seconds = max(0.0, seconds)
         minutes = int(seconds // 60)
-        return f"{minutes:02d}:{seconds - minutes * 60:04.1f}"
+        return f"{minutes:02d}:{seconds - minutes * 60:06.3f}"
 
     def is_busy(self) -> bool:
         workers_busy = self._preview_worker is not None or self._preview_timer.isActive()

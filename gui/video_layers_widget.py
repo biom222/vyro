@@ -33,9 +33,11 @@ class VideoLayersWidget(QWidget):
         controls.addWidget(self.source)
         controls.addStretch(1)
         add = QPushButton("Добавить слой")
+        self.add_button = add
         add.clicked.connect(self.add_layer)
         controls.addWidget(add)
         remove = QPushButton("Удалить")
+        self.remove_button = remove
         remove.clicked.connect(self.remove_selected)
         controls.addWidget(remove)
         root.addLayout(controls)
@@ -55,30 +57,33 @@ class VideoLayersWidget(QWidget):
         self.table.selectionModel().currentRowChanged.connect(lambda current, _: self._select_row(current.row()))
         root.addWidget(self.table, 1)
 
+        self.properties = QWidget()
+        details = QVBoxLayout(self.properties)
+        details.setContentsMargins(8, 8, 8, 8)
+        self.selection_label = QLabel("Выберите видеослой на шкале или в таблице")
+        self.selection_label.setWordWrap(True)
+        details.addWidget(self.selection_label)
         form = QFormLayout()
-        time_row = QHBoxLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         self.start = self._spin(0, 3600, 0.1, " сек.")
         self.end = self._spin(0, 3600, 0.1, " сек.")
         self.source_start = self._spin(0, 3600, 0.1, " сек.")
         for label, spin in (("От", self.start), ("До", self.end), ("Исходник с", self.source_start)):
-            time_row.addWidget(QLabel(label))
-            time_row.addWidget(spin)
+            form.addRow(label, spin)
             spin.valueChanged.connect(self._layer_changed)
-        form.addRow("Время", time_row)
-        geometry = QHBoxLayout()
         self.x = self._spin(0, 100, 1, " %")
         self.y = self._spin(0, 100, 1, " %")
         self.width = self._spin(10, 100, 1, " %")
         self.opacity = self._spin(0, 100, 1, " %")
         for label, spin in (("X", self.x), ("Y", self.y), ("Ширина", self.width),
                             ("Непрозрачность", self.opacity)):
-            geometry.addWidget(QLabel(label))
-            geometry.addWidget(spin)
+            form.addRow(label, spin)
             spin.valueChanged.connect(self._layer_changed)
-        geometry.addStretch()
-        form.addRow("Геометрия", geometry)
-        root.addLayout(form)
-        root.addWidget(QLabel("Положение задаётся в процентах свободного пространства кадра."))
+        details.addLayout(form)
+        hint = QLabel("Положение — в процентах свободного пространства кадра. Звук слоя не используется.")
+        hint.setWordWrap(True)
+        details.addWidget(hint)
+        details.addStretch()
         self._select_row(-1)
 
     @staticmethod
@@ -155,6 +160,10 @@ class VideoLayersWidget(QWidget):
 
     def _select_row(self, row: int) -> None:
         active = 0 <= row < len(self.layers)
+        self.add_button.setEnabled(bool(self.sources) and self.duration >= 0.1 and len(self.layers) < 4)
+        self.add_button.setToolTip("Добавить видеослой без звука" if self.sources else "Сначала добавьте видео")
+        self.remove_button.setEnabled(active)
+        self.selection_label.setText(f"Видеослой {row + 1} · время сборки" if active else "Выберите видеослой на шкале или в таблице")
         was_loading = self._loading
         self._loading = True
         self.source.setEnabled(bool(self.sources))

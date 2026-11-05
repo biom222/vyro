@@ -373,11 +373,13 @@ class YouTubeConnectWorker(QThread):
 class PreviewFrameWorker(QThread):
     succeeded = pyqtSignal(bytes, float)
     error = pyqtSignal(str)
+    timing = pyqtSignal(str, float, bool)
 
     def __init__(self, media_path: str, seconds: float, parent=None):
         super().__init__(parent)
         self.media_path = media_path
         self.seconds = max(0.0, seconds)
+        self.inspect_timing = False
 
     def run(self) -> None:
         command = [
@@ -406,5 +408,19 @@ class PreviewFrameWorker(QThread):
                 detail = completed.stderr.decode("utf-8", errors="replace").strip()
                 raise RuntimeError(detail or "FFmpeg did not return a preview frame")
             self.succeeded.emit(completed.stdout, self.seconds)
+            if self.inspect_timing:
+                import json
+                from fractions import Fraction
+                from app.media_process import execute
+                try:
+                    payload = json.loads(execute([settings.ffprobe_binary, "-v", "error", "-select_streams", "v:0",
+                        "-show_entries", "stream=avg_frame_rate,r_frame_rate", "-of", "json", self.media_path], timeout=10))
+                    stream = payload["streams"][0]
+                    average = float(Fraction(stream["avg_frame_rate"]))
+                    nominal = float(Fraction(stream["r_frame_rate"]))
+                    if 1 <= average <= 240:
+                        self.timing.emit(self.media_path, average, abs(average - nominal) > 0.01)
+                except (ValueError, KeyError, IndexError, ZeroDivisionError, RuntimeError):
+                    pass  # Frame display remains usable when rate metadata is unavailable.
         except Exception as exc:
             self.error.emit(str(exc))

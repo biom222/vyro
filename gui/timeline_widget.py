@@ -20,6 +20,8 @@ class TimelineWidget(QWidget):
         self.setMinimumHeight(178)
         self.setMaximumHeight(210)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Обрезка активного клипа")
         self.duration = 0.0
         self.position = 0.0
         self.start_time = 0.0
@@ -145,6 +147,7 @@ class TimelineWidget(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self.duration <= 0 or event.button() != Qt.MouseButton.LeftButton:
             return
+        self.setFocus()
         x = event.position().x()
         on_clip = 43 <= event.position().y() <= 101
         if on_clip and abs(x - self._x_for_time(self.start_time)) <= 10:
@@ -188,3 +191,118 @@ class TimelineWidget(QWidget):
     def _format_time(seconds: float) -> str:
         total = max(0.0, seconds)
         return f"{int(total // 60)}:{total % 60:04.1f}"
+
+
+class CompositionTimeline(QWidget):
+    """A selectable overview in output time; editing stays in the existing models."""
+
+    selected = pyqtSignal(str, int)
+    seek_requested = pyqtSignal(float)
+    LABEL_WIDTH = 86
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(136)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Шкала сборки: клипы, титры, видеослои и музыка")
+        self.duration = 0.0
+        self.position = 0.0
+        self.items = []
+        self.selection = ("video", 0)
+        self.overlap = 0.0
+        self.rows = [("video", -1, "Видео"), ("title", -1, "Титры"),
+                     ("overlay", -1, "Видеослои"), ("music", -1, "Музыка")]
+
+    def set_project(self, clips, titles, overlays, music, transition, overlap):
+        self.items = []
+        self.rows = [("video", -1, "Видео")]
+        for kind, layers, label in (("title", titles, "Титр"), ("overlay", overlays, "Слой")):
+            self.rows.extend((kind, index, f"{label} {index+1}") for index in range(len(layers)))
+            if not layers:
+                self.rows.append((kind, -1, label))
+        self.rows.append(("music", -1, "Музыка"))
+        self.setFixedHeight(36 + len(self.rows) * 25)
+        self.overlap = overlap if transition == "dissolve" else 0.0
+        offset = 0.0
+        for index, clip in enumerate(clips):
+            length = max(0.0, clip["end_time"] - clip["start_time"])
+            self.items.append(("video", index, offset, offset + length, clip["name"]))
+            offset += length - (self.overlap if index < len(clips) - 1 else 0)
+        self.duration = max(0.0, offset)
+        for kind, layers in (("title", titles), ("overlay", overlays)):
+            for index, layer in enumerate(layers):
+                self.items.append((kind, index, layer["start"], layer["end"],
+                                   layer.get("text", f"Слой {index + 1}")))
+        if music and self.duration:
+            self.items.append(("music", 0, 0.0, self.duration, "Музыка"))
+        self.update()
+
+    def _x_for_time(self, seconds):
+        return self.LABEL_WIDTH + seconds / max(0.001, self.duration) * max(1, self.width() - self.LABEL_WIDTH - 12)
+
+    def item_rect(self, item):
+        kind, _, start, end, _ = item
+        row = next(index for index, (row_kind, row_index, _) in enumerate(self.rows)
+                   if row_kind == kind and (row_index == item[1] or row_index == -1))
+        return QRectF(self._x_for_time(start), 25 + row * 25,
+                      max(3, self._x_for_time(end) - self._x_for_time(start)), 21)
+
+    def set_position(self, seconds):
+        self.position = min(max(0.0, seconds), self.duration)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        palette = self.palette()
+        text = palette.color(QPalette.ColorRole.Text)
+        muted = palette.color(QPalette.ColorRole.PlaceholderText)
+        painter.fillRect(self.rect(), palette.color(QPalette.ColorRole.Base))
+        painter.setPen(muted)
+        for index, (_, _, label) in enumerate(self.rows):
+            painter.drawText(QRectF(6, 25 + index * 25, 76, 21), Qt.AlignmentFlag.AlignVCenter, label)
+        if not self.duration:
+            painter.drawText(self.rect().adjusted(self.LABEL_WIDTH, 0, 0, 0), Qt.AlignmentFlag.AlignCenter,
+                             "Добавьте видео — здесь появится сборка")
+            return
+        ticks = max(2, (self.width() - self.LABEL_WIDTH) // 100)
+        for index in range(ticks + 1):
+            seconds = self.duration * index / ticks
+            x = self._x_for_time(seconds)
+            painter.drawText(QRectF(x - 24, 0, 48, 20), Qt.AlignmentFlag.AlignCenter,
+                             TimelineWidget._format_time(seconds))
+        for item in self.items:
+            kind, index, start, end, label = item
+            rect = self.item_rect(item)
+            selected = (kind, index) == self.selection
+            painter.fillRect(rect, QColor(ACCENT) if selected else palette.color(QPalette.ColorRole.Button))
+            painter.setPen(palette.color(QPalette.ColorRole.Mid))
+            painter.drawLine(rect.topLeft(), rect.bottomLeft())
+            painter.drawLine(rect.topRight(), rect.bottomRight())
+            label_rect = rect.adjusted(5, 0, -4, 0)
+            if kind == "video" and index > 0 and self.overlap:
+                transition = QRectF(rect.left(), rect.top(), max(2, self._x_for_time(start + self.overlap)-rect.left()), rect.height())
+                painter.fillRect(transition, QColor(ACCENT))
+                painter.setPen(text)
+                painter.drawLine(transition.bottomLeft(), transition.topRight())
+                label_rect.setLeft(transition.right() + 4)
+            painter.setPen(text)
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignVCenter,
+                             painter.fontMetrics().elidedText(label, Qt.TextElideMode.ElideRight, max(0, int(label_rect.width()))))
+        x = self._x_for_time(self.position)
+        painter.setPen(QPen(QColor(ACCENT), 2))
+        painter.drawLine(QPointF(x, 20), QPointF(x, self.height()-4))
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton or not self.duration:
+            return
+        self.setFocus()
+        point = event.position()
+        for item in reversed(self.items):
+            if self.item_rect(item).contains(point):
+                self.selection = item[:2]
+                self.selected.emit(*self.selection)
+                self.update()
+                return
+        if point.x() >= self.LABEL_WIDTH:
+            seconds = (point.x() - self.LABEL_WIDTH) / max(1, self.width() - self.LABEL_WIDTH - 12) * self.duration
+            self.seek_requested.emit(min(self.duration, max(0, seconds)))
