@@ -1,11 +1,12 @@
 # Technical core
 
-Phase 0 baseline `06ba4df`, updated with Phases 1-3 implementation on 2026-11-05.
+Phase 0 baseline `06ba4df`, updated with Phases 1-4 implementation on 2026-11-05.
 Detailed verification, risks and status labels: [PRODUCT_STATUS.md](PRODUCT_STATUS.md).
 Future scope and gates: [PRODUCTION_ROADMAP.md](PRODUCTION_ROADMAP.md).
 Data-safety implementation and exact verification: [PHASE1_REPORT.md](PHASE1_REPORT.md).
 Media execution/preset/matrix verification: [PHASE2_REPORT.md](PHASE2_REPORT.md).
 Editor interaction verification and open manual gate: [PHASE3_REPORT.md](PHASE3_REPORT.md).
+Project/media lifecycle and ownership evidence: [PHASE4_REPORT.md](PHASE4_REPORT.md).
 
 ## Runtime and source map
 
@@ -14,6 +15,7 @@ Editor interaction verification and open manual gate: [PHASE3_REPORT.md](PHASE3_
 | Desktop lifecycle | Root `main.py`, `gui/main_window.py`, QThread workers, scheduler thread | GUI construction and offscreen editor smoke pass; shutdown during uploads and crashes remains incomplete. |
 | Storage/schema | `app/models.py`, `app/database.py`, Alembic `7c1e4d2a9100` | Fresh, legacy and unversioned migration tests pass. Copies of both existing DBs match models after backed-up upgrade; originals update on next startup. |
 | Managed media | `media_library.py`, `storage.py` | Atomic managed copy/relink and conservative reference-aware stale cleanup; originals and final exports retained. Full storage/performance management remains later work. |
+| Project library | `library.py`, history widget and library/info/copy workers | Background inventory/metadata, recent projects, rename, confirmed metadata-only deletion, fingerprint thumbnail cache and remembered cancellable export copy. Real lifecycle passes; full native file-manager/performance matrix remains open. |
 | Video | `app/video_processor.py`, `app/media_process.py`, `app/tasks.py` | Real smoke, mixed codec/FPS/path matrix, proxy/export sampled frame/audio agreement, cancel/reap/timeout tests pass locally. Broad native/device coverage remains open. |
 | Editor/project state | `project_state.py`, `projects.py`, editor widgets | Atomic versioned snapshots, conflict/recovery, project duplication; equality after new-process reopen and pre-commit crash is tested. |
 | Transcription/subtitles | `transcription.py`, `subtitles.py`, `scenes.py` | Mock/real faster-whisper adapter, timed segments, SRT/VTT, subtitle burn, technical shot boundaries; real speech inference not reverified in audit. |

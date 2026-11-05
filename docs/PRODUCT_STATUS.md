@@ -1,6 +1,19 @@
 # Product status and Phase 0 baseline
 
-## Current update: Phase 3
+## Current update: Phase 4
+
+Phase 4 adds background project/media inventory in searchable QTableViews, created/
+updated/opened dates, duration/export/missing-source states, rename, recent/last-opened
+projects and confirmed metadata-only project deletion. Source/media rows, shared files,
+exports and publication records survive deletion; in-flight publications block it.
+Relink now commits the media path and a dirty project revision atomically, with rollback
+on snapshot failure. Technical metadata/thumbnails are cached by source fingerprint;
+MP4 copying is cancellable and atomic, remembers its folder and protects referenced media.
+65 regression tests, the editor UI check, real editor smoke and new real-media library
+lifecycle pass locally. See [PHASE4_REPORT.md](PHASE4_REPORT.md). No live providers were
+used; the earlier native Windows manual/DPI acceptance gap is still open.
+
+## Previous update: Phase 3
 
 Phase 3 implements a contextual inspector, independently resizable/saved editor areas,
 an assembly overview with separate title/overlay rows, persistent visible export status,

@@ -73,3 +73,25 @@
   actual process-exit matrix rather than suppressing the child-process failure.
 - Distinguish nine offscreen logical-size/DPR checks from native Windows manual signoff.
   Failed capture/Escape-stopped computer use is not evidence of a passing manual gate.
+
+## 2026-11-05 - Phase 4 project/media ownership
+
+- Delete project editing metadata only, with explicit default-No consent. Keep video
+  rows, their edits/transcripts, immutable sources/music/exports and publication records.
+  Use the existing foreign-key CASCADE/SET NULL behavior for project revisions,
+  candidates and detached media/ideas. Never infer filesystem deletion from ownership.
+- Refuse changed revisions, processing media and queued/scheduled/dispatching/publishing/
+  pending/unknown posts before deletion. Acquire the SQLite write transaction before
+  checking; preserve completed provider history. These guards do not redesign scheduling.
+- Persist recency (20 projects) and export destinations in existing AppPreference JSON;
+  no new project format or schema migration. Expose last/recent actions explicitly,
+  rather than automatically opening a potentially missing project at startup.
+- Keep source metadata and thumbnails as derived fingerprint caches, shared by project
+  copies. Read/probe/copy in QThreads; Qt pixmaps and table models stay on the GUI thread.
+- Extend the existing source import path with a copy-only option. Commit relink path,
+  export invalidation and a dirty checksum-protected revision together. Roll back both
+  DB changes and a newly generated copy on failure; never remove the original source.
+- Copy an export through a destination-local temporary file and atomic replace. Check
+  cancellation, protect current sources/exports, pinned publication media and retained
+  previous exports. Remember destination only on success; defer file-manager behavior
+  verification on every OS and broad cache/retention management to later phases.

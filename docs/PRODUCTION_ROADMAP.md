@@ -6,7 +6,8 @@ architecture. Current evidence and known findings: [PRODUCT_STATUS.md](PRODUCT_S
 
 Phase 0 audit and Phases 1-2 implementation have been executed; see their status/report
 documents. Phase 3 is implemented with automated verification; its native manual gate
-remains open. Phase 4 and later require separate commands. Do not combine the roadmap
+remains open. Phase 4 is implemented and locally verified; see its report. Phase 5 and
+later require separate commands. Do not combine the roadmap
 into one implementation change.
 
 ## Rules shared by every phase
@@ -108,6 +109,10 @@ workspace/resize matrix is not signed off; see [PHASE3_REPORT.md](PHASE3_REPORT.
 Gate: manual workspace/keyboard/resizing matrix and applicable GUI regressions pass.
 
 ## Phase 4 - Media library and project management
+
+Status: implemented and locally verified; see [PHASE4_REPORT.md](PHASE4_REPORT.md).
+The earlier native manual/DPI gate remains open; file-manager integration is contract
+tested locally, not signed off across operating systems.
 
 - Recent/last-opened projects, titles and created/updated dates, duration/export status,
   missing-media markers, locate/relink, duplicate and confirmed deletion.

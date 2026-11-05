@@ -56,3 +56,32 @@ it is approximate. Text fields, spin boxes and combo boxes keep their own editin
 Space/I/O/Delete do not unexpectedly control the timeline there. Modal dialogs and
 popup menus also retain their normal behavior. Ctrl+Z/Y apply to native text editing
 where supported; project-wide undo/redo is not implemented.
+
+## Projects and media library
+
+Open Projects from View or File -> Open Project. The Projects table supports search,
+sorting, creation/update/opened dates, sequence duration, missing-source and export
+states. The adjacent panel loads technical metadata and a cached thumbnail in the
+background. Project Files limits the Videos table to that project; Show All Videos
+clears that filter. Select an unavailable video and use Locate Source to relink it.
+
+File -> Recent Projects and Open Last Project use the saved local recency list. A
+project does not auto-open at application startup. Rename keeps the same project;
+Duplicate creates independent editing state sharing the original immutable media.
+
+Delete asks for confirmation, defaulting to No. It removes the project's editing
+history, not its source video records/files, music, exports or publication records.
+Detached video records remain under Videos and Publications. Reopening one can start
+a new project; it does not restore deleted sequence edits. Pending/uncertain publications
+and processing media block deletion. There is no project-delete undo or disk cleanup.
+
+Relink validates duration/resolution and preserves the old file. It atomically updates
+the source link and marks the project dirty for re-export. Relinking an active project
+saves and closes its editor first; open it again after success. Other projects sharing
+the old source keep their own links. Missing music is replaced in Assembly's Music
+control; source relink is a video operation, not soundtrack replacement.
+
+Save As for a finished MP4 remembers the last successful folder and copies in a
+cancellable background worker. Referenced sources/exports cannot be overwritten.
+Show File opens the local file manager (selecting the file on Windows/macOS where
+supported); an unavailable file produces a readable message instead.

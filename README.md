@@ -20,6 +20,9 @@ before treating a feature list as a release guarantee.
 - Keyframes for title position and opacity with linear interpolation
 - Cached low-resolution preview with transitions, music, subtitles, and layers before final export
 - Local SQLite database through SQLAlchemy
+- Searchable project/media tables with dates, duration, export/missing-file states and cached thumbnails
+- Recent/last-opened projects, rename, independent duplicate and confirmed metadata-only deletion
+- Atomic source relink, remembered export folder, cancellable background MP4 copy and file-manager reveal
 - Background FFprobe inspection with duration and resolution
 - Time trim, optional 1080×1920 crop with manual horizontal positioning, and Unicode text overlay
 - FFmpeg encoding progress plus effect stages, cancellation from the toolbar (Ctrl+.) and inspector
@@ -338,6 +341,17 @@ This runs isolated Qt offscreen checks at 100/125/150% for 1040x700, 1380x860 an
 1920x1080 logical sizes. Screenshots and JSON reports stay under `work/editor-ui/`.
 It does not change Windows display settings. See [editor workflow](docs/EDITOR_WORKFLOW.md)
 and [Phase 3 verification boundaries](docs/PHASE3_REPORT.md).
+
+Project/media lifecycle checks with real FFmpeg media:
+
+```bash
+python tests/library_smoke.py
+```
+
+This creates isolated projects under ignored `work/library-check/`, validates shared
+media retention, deletion confirmation, source loss/relink, metadata cache and export
+copying. See [Phase 4 report](docs/PHASE4_REPORT.md). Project deletion removes its edit
+history; source video records/files, music, exports and publication records are retained.
 
 They cover the fresh Alembic baseline, database updates, projects, transcripts, subtitle formats, AI contracts, trend snapshots,
 OAuth refresh, idempotent analytics, scheduler failure isolation, duplicate-publication protection,
