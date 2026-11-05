@@ -20,7 +20,8 @@ before treating a feature list as a release guarantee.
 - Local SQLite database through SQLAlchemy
 - Background FFprobe inspection with duration and resolution
 - Time trim, optional 1080×1920 crop with manual horizontal positioning, and Unicode text overlay
-- Stage-based render progress without blocking the interface
+- FFmpeg encoding progress plus effect stages, cancellation from the toolbar (Ctrl+.) and inspector
+- Saved source/common FPS and Standard/High quality presets; bounded media-tool timeouts
 - Save As export for completed MP4 files
 - Direct YouTube, TikTok, and Instagram account connection and publishing in background threads
 - Top Accounts menu with per-service account submenus and a checked active publishing target
@@ -316,6 +317,15 @@ python tests/editor_smoke.py
 
 It creates test media, an isolated database, and screenshots under `work/editor-check/`.
 
+The real-file codec/FPS/path/30-clip matrix and cancellable QThread checks run separately:
+
+```bash
+python tests/media_matrix.py
+```
+
+Artifacts and the latest measured JSON report stay under ignored `work/media-check/`.
+See [Phase 2 verification and limits](docs/PHASE2_REPORT.md).
+
 They cover the fresh Alembic baseline, database updates, projects, transcripts, subtitle formats, AI contracts, trend snapshots,
 OAuth refresh, idempotent analytics, scheduler failure isolation, duplicate-publication protection,
 OAuth channel connection, mocked direct API upload contracts, background scheduler lifecycle, probe/render contracts, and construction of
@@ -324,5 +334,6 @@ the complete eight-section workspace.
 The retained Docker/Compose files are engineering scaffolding, not a desktop runtime
 requirement. Their current image omits migration assets, so the container check is not
 part of the passing Phase 0 baseline. Launch the desktop GUI on the host with
-`python main.py` or the local executable. Legacy schema parity, crash recovery, live
-providers, clean-machine installation and scaling coverage remain separate release gates.
+`python main.py` or the local executable. Schema parity and interrupted-save/migration
+recovery have isolated automated coverage. Real power loss, live providers,
+clean-machine installation and native scaling coverage remain separate release gates.

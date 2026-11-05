@@ -31,3 +31,23 @@
   lock handling stays automatic. No new lock service or manual lock-file workflow.
 - Verify migrations on copies of current source and installed DBs. Let normal startup
   apply the backed-up upgrade to originals; test execution does not mutate them.
+
+## 2026-11-05 - Phase 2 local media hardening
+
+- Retain the existing sequence graph and QThreads. Add one managed process runner,
+  thread-local operation contexts and explicit worker cancel events; never use a global
+  current process or terminate QThreads. Reap each process and drain bounded pipes.
+- Preserve the previous export on cancellation. Check the temporary result before
+  moving it to its final filename. Later application-crash orphan recovery remains
+  covered by conservative Phase 1 cleanup, not immediate deletion of final exports.
+- Keep two quality presets (CRF 23/18) and six FPS choices (24/25/30/50/60/source).
+  Source means the first clip's average FPS converted to CFR, including rational rates.
+  Persist both in the existing editor JSON; no migration or separate export model.
+- Keep proxy at half resolution, correct proportional text geometry, and invalidate
+  old cache signatures. Sample proxy/export frame and decoded-audio differences;
+  do not claim identical pixels or a real-time compositor.
+- Pad short source audio to its clip length before concatenation. Add no new loudness
+  normalization. Use ASCII local filter filenames plus a subprocess cwd for text and
+  subtitle filters so user paths do not enter FFmpeg's second escaping layer.
+- Expose cancellation in the toolbar/menu as well as the scrollable inspector. Defer
+  the broader editor layout/selection/keyboard/scaling redesign to Phase 3.

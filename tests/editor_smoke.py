@@ -271,6 +271,16 @@ def main():
     wait_for(lambda: not editor.is_busy())
     assert editor.video_layers_widget.layers[0]["video_id"] == overlay_source
     assert editor.video_layers_widget.layers[0]["start"] == 1
+    editor.edit_widget.fps.setCurrentIndex(editor.edit_widget.fps.findData("25"))
+    editor.edit_widget.quality.setCurrentIndex(editor.edit_widget.quality.findData("high"))
+    assert editor.save_project()
+    editor.open_existing(current_id)
+    wait_for(lambda: not editor.is_busy())
+    assert editor.edit_widget.fps.currentData() == "25"
+    assert editor.edit_widget.quality.currentData() == "high"
+    editor.edit_widget.edit_tabs.setCurrentIndex(2)
+    QTest.qWait(50)
+    assert window.grab().save(str(CHECK / "export-settings.png"))
     editor.editor_tabs.setCurrentWidget(editor.layers_widget)
     QTest.qWait(100)
     assert window.grab().save(str(CHECK / "title-layers.png"))
@@ -305,6 +315,23 @@ def main():
     assert editor.layers_widget.layers[0]["text"] == "Animated test title"
     assert editor.video_layers_widget.layers[0]["video_id"] == overlay_source
     editor.shutdown_preview()
+    wait_for(lambda: not editor.is_busy())
+    retained_output = editor.edit_widget.output_path
+    editor.edit_widget.start_render()
+    assert window.cancel_render_action.isVisible() and not window.export_action.isEnabled()
+    cancel_signal = QSignalSpy(editor.edit_widget.worker.cancelled)
+    QTest.qWait(150)
+    assert window.grab().save(str(CHECK / "export-cancellation.png"))
+    window.cancel_render_action.trigger()
+    wait_for(lambda: editor.edit_widget.worker is None, seconds=10)
+    assert len(cancel_signal) == 1
+    assert not window.cancel_render_action.isVisible() and window.export_action.isEnabled()
+    assert Path(retained_output).is_file()
+    with SessionLocal() as session:
+        from app.models import Video
+        retained_video = session.get(Video, current_id)
+        assert retained_video.status == "ready" and retained_video.output_path == retained_output
+    editor.open_existing(current_id)
     wait_for(lambda: not editor.is_busy())
     window.publish_widget.title_edit.setText("Saved publication title")
     window.publish_widget.description_edit.setPlainText("Saved publication description")

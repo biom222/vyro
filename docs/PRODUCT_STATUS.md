@@ -1,24 +1,31 @@
 # Product status and Phase 0 baseline
 
-## Current update: Phase 1
+## Current update: Phase 2
 
 Phase 1 implementation and verification are recorded in [PHASE1_REPORT.md](PHASE1_REPORT.md).
 Current code adds transactional versioned drafts, recovery, project duplication/Save As,
 SQLite online backups and interrupted-migration recovery, physical schema validation,
 safe disposable cleanup, a single-instance guard and pinned media for new posts.
-The full suite now has 52 passing tests and the expanded real editor smoke passes.
+Phase 2 adds bounded/cancellable FFmpeg execution, saved FPS/quality presets, readable
+media errors, short-audio padding and proportional proxy text. See [PHASE2_REPORT.md](PHASE2_REPORT.md).
+The full suite now has 60 passing tests; the expanded real editor smoke and real-file
+media matrix pass. The matrix includes 295-character Unicode/apostrophe Windows paths,
+VFR, software HEVC, odd dimensions, 30 mixed clips in final export and a 600-second
+30-clip proxy. Sampled proxy/export frame errors are below 2.3/255, with identical
+decoded audio in the tested fixture. These are local synthetic checks, not a full
+native playback/device/performance release gate.
 The following Phase 0 inventory and A01-A17 findings remain the historical baseline;
 they are not all unresolved current claims. Resolution:
 
-| Findings | Phase 1 outcome |
+| Findings | Phases 1-2 outcome |
 | --- | --- |
 | A01-A03 | Migration `7c1e4d2a9100` repairs schema drift; online backups/restore and interrupted upgrade tests pass. Transactional snapshots, conflict checks and failed-save close prevention are implemented. Verified on read-only copies of both existing DBs; originals upgrade on next startup. |
 | A07 | New posts pin export path/duration; old exports are retained. Legacy unpinned posts still need Phase 8 handling. |
-| A08 | Old-export deletion removed; conservative stale artifact cleanup added. FFmpeg cancel/timeouts remain Phase 2/13. |
+| A08 | Old-export deletion removed; conservative stale artifact cleanup added. Phase 2 adds FFmpeg cancel/timeouts/reaping and partial-output cleanup. Broader task lifecycle remains Phase 13. |
 | A13 | Publishing draft/account is part of project snapshots; duplicate and Save As now exist with independent edits/shared immutable media. |
 | A17 | The checkout-env test now makes its own fixture. No production CI/clean-machine release claim is made. |
 
-Remaining A04-A06/A09-A12/A14-A16 are not fixed by this phase. Live providers still
+Remaining A04-A06/A09-A12/A14-A16 are not fixed by these phases. Live providers still
 have no LIVE VERIFIED status. See the Phase 1 report for the autosave window, shared
 media, backup/recovery and untouched live-DB limitations.
 

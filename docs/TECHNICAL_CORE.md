@@ -1,9 +1,10 @@
 # Technical core
 
-Phase 0 baseline `06ba4df`, updated with Phase 1 implementation on 2026-11-05.
+Phase 0 baseline `06ba4df`, updated with Phases 1-2 implementation on 2026-11-05.
 Detailed verification, risks and status labels: [PRODUCT_STATUS.md](PRODUCT_STATUS.md).
 Future scope and gates: [PRODUCTION_ROADMAP.md](PRODUCTION_ROADMAP.md).
 Data-safety implementation and exact verification: [PHASE1_REPORT.md](PHASE1_REPORT.md).
+Media execution/preset/matrix verification: [PHASE2_REPORT.md](PHASE2_REPORT.md).
 
 ## Runtime and source map
 
@@ -12,7 +13,7 @@ Data-safety implementation and exact verification: [PHASE1_REPORT.md](PHASE1_REP
 | Desktop lifecycle | Root `main.py`, `gui/main_window.py`, QThread workers, scheduler thread | GUI construction and offscreen editor smoke pass; shutdown during uploads and crashes remains incomplete. |
 | Storage/schema | `app/models.py`, `app/database.py`, Alembic `7c1e4d2a9100` | Fresh, legacy and unversioned migration tests pass. Copies of both existing DBs match models after backed-up upgrade; originals update on next startup. |
 | Managed media | `media_library.py`, `storage.py` | Atomic managed copy/relink and conservative reference-aware stale cleanup; originals and final exports retained. Full storage/performance management remains later work. |
-| Video | `app/video_processor.py`, `app/tasks.py` | Real smoke export; codec/path/FPS stress matrix, cancellation and timeout hardening remain open. |
+| Video | `app/video_processor.py`, `app/media_process.py`, `app/tasks.py` | Real smoke, mixed codec/FPS/path matrix, proxy/export sampled frame/audio agreement, cancel/reap/timeout tests pass locally. Broad native/device coverage remains open. |
 | Editor/project state | `project_state.py`, `projects.py`, editor widgets | Atomic versioned snapshots, conflict/recovery, project duplication; equality after new-process reopen and pre-commit crash is tested. |
 | Transcription/subtitles | `transcription.py`, `subtitles.py`, `scenes.py` | Mock/real faster-whisper adapter, timed segments, SRT/VTT, subtitle burn, technical shot boundaries; real speech inference not reverified in audit. |
 | AI/ideas | `ai.py`, `content_pipeline.py` | Deterministic mock, real structured-output OpenAI adapter, persisted suggestions; real AI quality unverified. |
@@ -40,7 +41,14 @@ latter can block and needs later hardening.
 - Basic continuous preview follows source trims. Effect preview separately renders a
   cached 540x960 vertical proxy (or 640x360 landscape) with transitions/music/subtitles/
   titles/overlays through the existing pipeline. It is not a zero-latency compositor.
-- H.264/yuv420p/AAC MP4 export with faststart and stage progress. Proxy/final agreement
+- H.264/yuv420p/AAC MP4 export with faststart, saved common/source FPS and CRF 23/18
+  presets. VFR is converted to CFR; source mode uses the first clip's average rate.
+  The main encoding pass reports FFmpeg output time; later effect passes report stages.
+  Independent worker cancellation contexts propagate through nested FFmpeg/FFprobe calls;
+  pipes are drained with bounded tails, tools terminate/kill/wait on cancel or deadline.
+  Probe timeout is 30 seconds, a tool pass 30 minutes, a render operation 60 minutes.
+  Cancelled exports restore the previous ready/uploaded DB state and retain older MP4s.
+  Proxy/final agreement
   is sampled by smoke tests, not exhaustively established for all media and effects.
 
 These compositing/title/keyframe/effect-proxy features are implemented; the former

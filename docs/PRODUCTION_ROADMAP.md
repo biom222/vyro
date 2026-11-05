@@ -4,8 +4,8 @@ Source: the user's MASTER specification supplied on 2026-11-05. This roadmap cov
 Phase 0 through Phase 16 and preserves the current Python/PyQt6/SQLite/FFmpeg desktop
 architecture. Current evidence and known findings: [PRODUCT_STATUS.md](PRODUCT_STATUS.md).
 
-Phase 0 audit and Phase 1 implementation have been executed; see their status/report
-documents. Phase 2 and later require separate commands. Do not combine the roadmap
+Phase 0 audit and Phases 1-2 implementation have been executed; see their status/report
+documents. Phase 3 and later require separate commands. Do not combine the roadmap
 into one implementation change.
 
 ## Rules shared by every phase
@@ -74,6 +74,9 @@ Gate: automated `create -> edit -> save -> shutdown -> reopen -> state equality`
 interrupted-save/migration and restore evidence. Never close after an unhandled save failure.
 
 ## Phase 2 - Video editor hardening
+
+Status: implemented and locally verified; see [PHASE2_REPORT.md](PHASE2_REPORT.md).
+Clean-machine/native playback and broader device/performance coverage remain open.
 
 - Test mixed/common FPS, VFR, portrait/landscape/square, silent media and sample rates,
   H.264/available HEVC, odd dimensions, long/Unicode/Russian/space-containing Windows
