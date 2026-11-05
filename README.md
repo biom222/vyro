@@ -13,6 +13,8 @@ before treating a feature list as a release guarantee.
 - Eight-section creator workspace with dashboard, editor, AI clips, trends,
   content calendar, publishing, history, and settings
 - Built-in video preview, clip timeline, and in/out point controls
+- Contextual clip/title/overlay inspector, selectable assembly overview and independent visible layer rows
+- Saved splitter sizes/zoom/selection, millisecond timecode and source-FPS frame stepping
 - Ordered multi-clip assembly with per-clip trim, cut/dissolve transitions, and optional music
 - Up to four independent silent picture-in-picture video layers and eight animated title layers
 - Keyframes for title position and opacity with linear interpolation
@@ -325,6 +327,17 @@ python tests/media_matrix.py
 
 Artifacts and the latest measured JSON report stay under ignored `work/media-check/`.
 See [Phase 2 verification and limits](docs/PHASE2_REPORT.md).
+
+Editor keyboard, selection, layout persistence and size/DPI checks:
+
+```bash
+python tests/editor_ui_check.py --matrix
+```
+
+This runs isolated Qt offscreen checks at 100/125/150% for 1040x700, 1380x860 and
+1920x1080 logical sizes. Screenshots and JSON reports stay under `work/editor-ui/`.
+It does not change Windows display settings. See [editor workflow](docs/EDITOR_WORKFLOW.md)
+and [Phase 3 verification boundaries](docs/PHASE3_REPORT.md).
 
 They cover the fresh Alembic baseline, database updates, projects, transcripts, subtitle formats, AI contracts, trend snapshots,
 OAuth refresh, idempotent analytics, scheduler failure isolation, duplicate-publication protection,

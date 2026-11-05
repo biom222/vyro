@@ -1,12 +1,23 @@
 # Product status and Phase 0 baseline
 
-## Current update: Phase 2
+## Current update: Phase 3
+
+Phase 3 implements a contextual inspector, independently resizable/saved editor areas,
+an assembly overview with separate title/overlay rows, persistent visible export status,
+millisecond timecode, source-rate frame stepping and guarded keyboard editing.
+60 regression tests and the real editor smoke pass; an additional Qt UI check passes
+all nine size/scale combinations, 8-title/4-overlay display, selection, shortcuts,
+layout reopen and process exit. A Qt Multimedia teardown fault found during testing
+was corrected by detaching player resources before application destruction.
+Native Windows accessibility was inspected, but complete interactive/manual acceptance
+remains OPEN: capture timed out and computer-use subsequently reported Escape stop.
+See [PHASE3_REPORT.md](PHASE3_REPORT.md) for evidence and limits.
 
 Phase 1 implementation and verification are recorded in [PHASE1_REPORT.md](PHASE1_REPORT.md).
 Current code adds transactional versioned drafts, recovery, project duplication/Save As,
 SQLite online backups and interrupted-migration recovery, physical schema validation,
 safe disposable cleanup, a single-instance guard and pinned media for new posts.
-Phase 2 adds bounded/cancellable FFmpeg execution, saved FPS/quality presets, readable
+Phase 2 added bounded/cancellable FFmpeg execution, saved FPS/quality presets, readable
 media errors, short-audio padding and proportional proxy text. See [PHASE2_REPORT.md](PHASE2_REPORT.md).
 The full suite now has 60 passing tests; the expanded real editor smoke and real-file
 media matrix pass. The matrix includes 295-character Unicode/apostrophe Windows paths,

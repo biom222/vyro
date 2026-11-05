@@ -51,3 +51,25 @@
   subtitle filters so user paths do not enter FFmpeg's second escaping layer.
 - Expose cancellation in the toolbar/menu as well as the scrollable inspector. Defer
   the broader editor layout/selection/keyboard/scaling redesign to Phase 3.
+
+## 2026-11-05 - Phase 3 editor interaction
+
+- Reparent existing properties into contextual right-hand inspector pages. Keep the
+  established models, signals, tables and render payloads; no second editor state tree.
+- Draw a selectable assembly overview from existing clips/layers/music. Use independent
+  layer rows and scrollbars for the maximum layer count. Reordering, exact trims and
+  keyframe edits remain in their existing controls, not misleading fake drag gestures.
+- Remove fixed maximum panel widths and forced tab-driven splitter sizes. Respect user
+  splitters, viewport minimums and optional workspace JSON for layout/zoom/selection.
+- Keep export progress/result/cancel actions outside scrollable properties. Expose frame
+  and delete commands in the Montage menu, with editor-scoped shortcuts that preserve
+  text fields, spin boxes, combo boxes, dialogs and popups.
+- Step CFR sources on their asynchronously inspected FPS grid. Mark VFR stepping as
+  approximate rather than implying packet-accurate seeking; retain effect-proxy workflow.
+- Do not add a partial global undo. Native text Ctrl+Z remains available; project undo
+  requires a separate complete command/history design.
+- A fractional-DPI test exposed a Qt Multimedia exit access violation. Detach media
+  source/sinks/audio and the application event filter on accepted close. Repeat the
+  actual process-exit matrix rather than suppressing the child-process failure.
+- Distinguish nine offscreen logical-size/DPR checks from native Windows manual signoff.
+  Failed capture/Escape-stopped computer use is not evidence of a passing manual gate.

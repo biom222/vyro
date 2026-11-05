@@ -1,10 +1,11 @@
 # Technical core
 
-Phase 0 baseline `06ba4df`, updated with Phases 1-2 implementation on 2026-11-05.
+Phase 0 baseline `06ba4df`, updated with Phases 1-3 implementation on 2026-11-05.
 Detailed verification, risks and status labels: [PRODUCT_STATUS.md](PRODUCT_STATUS.md).
 Future scope and gates: [PRODUCTION_ROADMAP.md](PRODUCTION_ROADMAP.md).
 Data-safety implementation and exact verification: [PHASE1_REPORT.md](PHASE1_REPORT.md).
 Media execution/preset/matrix verification: [PHASE2_REPORT.md](PHASE2_REPORT.md).
+Editor interaction verification and open manual gate: [PHASE3_REPORT.md](PHASE3_REPORT.md).
 
 ## Runtime and source map
 
@@ -36,6 +37,17 @@ latter can block and needs later hardening.
 - Up to four independently timed silent video overlays with source offset, position,
   width and opacity; not a general audio/video multitrack editor.
 - Up to eight timed title layers with linear x/y/opacity keyframes, plus a basic caption.
+- Existing sequence/title/video-layer models drive a selectable assembly overview;
+  each overlapping title/video layer has its own row. Exact edits use the existing
+  tables and contextual right inspector. The overview is not a new compositing engine.
+- Splitter sizes, selected inspector tab/layers and zoom persist in the existing draft's
+  optional `workspace` JSON. Old drafts use defaults; no schema migration.
+- Qt input filtering scopes transport/frame/mark/delete shortcuts to the visible editor,
+  preserving text/spin/combo input, modal dialogs, popups and native text undo. There is
+  no global project undo. FPS metadata is inspected asynchronously and cached per source;
+  CFR stepping uses its frame grid, VFR stepping uses a clearly marked approximation.
+- Closing explicitly detaches Qt Multimedia sinks/audio/source and removes the editor
+  event filter before QApplication teardown. Other task/shutdown hardening remains later scope.
 - Timed subtitle burn uses saved transcript ranges aligned to sequence offsets and
   dissolves. A complete subtitle segment editor is absent.
 - Basic continuous preview follows source trims. Effect preview separately renders a

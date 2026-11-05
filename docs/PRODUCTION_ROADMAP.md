@@ -5,7 +5,8 @@ Phase 0 through Phase 16 and preserves the current Python/PyQt6/SQLite/FFmpeg de
 architecture. Current evidence and known findings: [PRODUCT_STATUS.md](PRODUCT_STATUS.md).
 
 Phase 0 audit and Phases 1-2 implementation have been executed; see their status/report
-documents. Phase 3 and later require separate commands. Do not combine the roadmap
+documents. Phase 3 is implemented with automated verification; its native manual gate
+remains open. Phase 4 and later require separate commands. Do not combine the roadmap
 into one implementation change.
 
 ## Rules shared by every phase
@@ -92,6 +93,9 @@ Gate: real-file integration matrix passes; preview/export agreement and cancella
 behavior are documented. No effects expansion before existing paths are dependable.
 
 ## Phase 3 - Editor UI/UX refinement
+
+Status: implemented; automated keyboard/layout/size/DPI checks pass. The native manual
+workspace/resize matrix is not signed off; see [PHASE3_REPORT.md](PHASE3_REPORT.md).
 
 - Keep media bin left, preview center, contextual inspector right and timeline below,
   resized through splitters. Make selected clip, trims/playhead/boundaries/transitions,
