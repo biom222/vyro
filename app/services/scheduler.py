@@ -68,6 +68,13 @@ def run_due_posts(
                 post = session.get(Post, post_id)
                 if post is None:
                     continue
+                if post.status == "unknown" or (post.platform == "youtube" and
+                        (post.external_id or (post.payload_json or {}).get("youtube_upload_attempted"))):
+                    if post.status not in {"pending", "published", "unknown"}:
+                        post.status = "unknown"
+                        session.commit()
+                    logger.warning("Post %s requires reconciliation; automatic upload retry blocked", post_id)
+                    continue
                 attempts = post.retry_count or 0
                 if post.status == "dispatching":
                     attempts += 1

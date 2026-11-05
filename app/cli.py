@@ -87,6 +87,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     try:
         init_db()
         if args.command == "init-db":

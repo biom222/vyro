@@ -524,6 +524,9 @@ class HistoryWidget(QWidget):
             post = session.get(Post, post_id)
             if post is None:
                 return
+            if post.platform == "youtube" and (post.external_id or (post.payload_json or {}).get("youtube_upload_attempted")):
+                QMessageBox.warning(self, "Проверьте статус", "Эта операция уже отправлялась в YouTube. Повторная загрузка заблокирована; используйте проверку статуса в разделе публикации.")
+                return
             if post.status not in {"error", "queued"} or post.account_id is None:
                 QMessageBox.warning(self, "Повторная публикация",
                                     "Опубликованный или ожидающий ролик нельзя отправлять повторно: это создаст дубликат.")

@@ -6,10 +6,11 @@ from pathlib import Path
 from PyQt6.QtCore import QDateTime, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDateTimeEdit, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QTextEdit, QVBoxLayout, QWidget,
+    QLineEdit, QMessageBox, QPushButton, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
 
 from app.config import settings
+from sqlalchemy import select
 from app.models import ConnectedAccount, Post, SessionLocal, Video
 from app.services.accounts import get_active_account_id, set_active_account
 from app.services.scheduler import schedule_post
@@ -103,11 +104,24 @@ class PublishWidget(QWidget):
         self.status_label.setObjectName("muted")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
+        self.upload_progress = QProgressBar()
+        self.upload_progress.setRange(0, 100)
+        self.upload_progress.setFormat("Загрузка не запущена")
+        layout.addWidget(self.upload_progress)
+        self.pending_combo = QComboBox()
+        self.check_status_button = QPushButton("Проверить статус YouTube")
+        self.check_status_button.clicked.connect(self.check_selected_status)
+        layout.addWidget(self.pending_combo)
+        layout.addWidget(self.check_status_button)
+        self.remote_label = QLabel()
+        self.remote_label.setOpenExternalLinks(True)
+        layout.addWidget(self.remote_label)
         layout.addStretch()
         self.status_timer = QTimer(self)
         self.status_timer.setInterval(10000)
         self.status_timer.timeout.connect(self._poll_status)
         self.refresh_account()
+        self.refresh_pending_posts()
         self.title_edit.textChanged.connect(self._emit_draft)
         self.description_edit.textChanged.connect(self._emit_draft)
         self.privacy_combo.currentIndexChanged.connect(self._emit_draft)
@@ -273,6 +287,13 @@ class PublishWidget(QWidget):
                 })
             elif account.provider == "youtube":
                 options["youtube_privacy"] = self.privacy_combo.currentData() or "private"
+                for previous in session.scalars(select(Post).where(Post.account_id == account.id, Post.video_id == video.id)):
+                    old = previous.payload_json or {}
+                    if old.get("media_path") == str(Path(video.output_path).resolve()) and (
+                            previous.status in {"queued", "scheduled", "dispatching", "publishing", "pending", "published", "unknown"}
+                            or old.get("youtube_upload_attempted")):
+                        QMessageBox.warning(self, "Повторная отправка", f"Для этого экспорта уже есть отправка #{previous.id}. Проверьте её статус.")
+                        return None
             options.update({"media_path": str(Path(video.output_path).resolve()), "media_duration": duration})
             post = Post(video_id=video.id, account_id=account.id, platform=account.provider,
                         title=self.title_edit.text().strip(),
@@ -294,8 +315,11 @@ class PublishWidget(QWidget):
         self.publish_button.setEnabled(False)
         self.schedule_button.setEnabled(False)
         self.status_label.setText("Видео отправляется в фоновом потоке…")
+        self.upload_progress.setValue(0)
+        self.upload_progress.setFormat("Отправка данных · %p%")
         self.publish_worker = PublishWorker(post_id, self)
         self.publish_worker.succeeded.connect(self._publish_succeeded)
+        self.publish_worker.progress.connect(self.upload_progress.setValue)
         self.publish_worker.error.connect(self._publish_failed)
         self.publish_worker.finished.connect(self._publish_finished)
         self.publish_worker.start()
@@ -326,13 +350,16 @@ class PublishWidget(QWidget):
         self.status_label.setText(f"Статус публикации: {status}")
         self.log_message.emit(f"Публикация #{post_id}: {status}.")
         self.publication_completed.emit()
+        self.refresh_pending_posts()
         if status == "pending":
+            self.upload_progress.setFormat("Данные приняты; сервер обрабатывает видео")
             self.pending_post_id = post_id
             self.status_timer.start()
         else:
             QMessageBox.information(self, "Публикация", f"Статус: {status}")
 
     def _publish_failed(self, message: str) -> None:
+        self.refresh_pending_posts()
         self.status_label.setText(f"Ошибка публикации: {message}")
         self.log_message.emit(self.status_label.text())
         QMessageBox.critical(self, "Ошибка публикации", message)
@@ -354,10 +381,40 @@ class PublishWidget(QWidget):
 
     def _status_loaded(self, post_id: int, status: str) -> None:
         self.status_label.setText(f"Публикация #{post_id}: {status}")
+        with SessionLocal() as session:
+            post = session.get(Post, post_id)
+            if post:
+                import html
+                details = post.payload_json or {}
+                privacy = details.get("youtube_privacy_actual", "")
+                self.remote_label.setText(f'<a href="{html.escape(post.external_url or "", quote=True)}">Открыть ролик</a> · {html.escape(privacy)}')
+                if post.error_message:
+                    self.status_label.setText(post.error_message)
+                elif status == "published" and post.platform == "youtube":
+                    self.status_label.setText(f"YouTube подтвердил обработку ролика #{post_id}. Видимость: {privacy}.")
         if status != "pending":
             self.pending_post_id = None
             self.status_timer.stop()
             self.publication_completed.emit()
+            self.refresh_pending_posts()
+
+    def refresh_pending_posts(self):
+        self.pending_combo.clear()
+        with SessionLocal() as session:
+            rows = list(session.scalars(select(Post).where(Post.platform == "youtube",
+                Post.status.in_(("pending", "unknown", "publishing", "published"))).order_by(Post.id.desc()).limit(100)))
+        for row in rows:
+            self.pending_combo.addItem(f"#{row.id} · {row.title or 'YouTube'} · {row.status}" + (" · нет ID, проверьте канал" if not row.external_id else ""), row.id)
+        self.check_status_button.setEnabled(bool(rows))
+        if not rows:
+            self.pending_combo.addItem("Нет отправок YouTube")
+
+    def check_selected_status(self):
+        post_id = self.pending_combo.currentData()
+        if post_id is None or self.status_worker:
+            return
+        self.pending_post_id = post_id
+        self._poll_status()
 
     def _status_failed(self, message: str) -> None:
         self.status_timer.stop()

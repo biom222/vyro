@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -13,6 +14,7 @@ from app.config import settings
 from app.models import ConnectedAccount, SessionLocal
 from app.services.social_oauth import get_social_access_token
 from app.services.youtube_oauth import get_valid_access_token
+from app.services.youtube_errors import require_success
 
 TIKTOK_BASE = "https://open.tiktokapis.com/v2/post/publish"
 
@@ -84,34 +86,71 @@ def get_tiktok_creator_info(account_id: int, *, client: httpx.Client | None = No
 
 
 def _youtube(path: Path, account_id: int, title: str, description: str,
-             options: dict[str, Any], http: httpx.Client) -> PublicationResult:
+             options: dict[str, Any], http: httpx.Client, progress=None, checkpoint=None) -> PublicationResult:
     token = get_valid_access_token(account_id, client=http)
     privacy = str(options.get("youtube_privacy") or "private")
     if privacy not in {"private", "unlisted", "public"}:
         raise PublishingError("Invalid YouTube privacy setting")
+    title = title.strip() or path.stem
+    if not 1 <= len(title) <= 100 or any(c in title + description for c in "<>") or len(description.encode("utf-8")) > 5000:
+        raise PublishingError("YouTube: заголовок — 1–100 символов, описание — до 5000 байт UTF-8; символы < и > запрещены.")
     metadata = {
         "snippet": {"title": title or path.stem, "description": description},
         "status": {"privacyStatus": privacy},
     }
+    size = path.stat().st_size
+    if size <= 0:
+        raise PublishingError("Video file is empty")
     start = http.post("https://www.googleapis.com/upload/youtube/v3/videos",
         params={"uploadType": "resumable", "part": "snippet,status"},
         headers={**_bearer(token), "X-Upload-Content-Type": "video/mp4",
-                 "X-Upload-Content-Length": str(path.stat().st_size)}, json=metadata)
-    start.raise_for_status()
+                 "X-Upload-Content-Length": str(size)}, json=metadata)
+    require_success(start)
     upload_url = start.headers.get("Location") or ""
     _approved_upload_url(upload_url, "googleapis.com")
+    def chunks(source):
+        sent = 0
+        if progress:
+            progress(0)
+        while chunk := source.read(1024 * 1024):
+            sent += len(chunk)
+            if progress:
+                progress(min(99, round(sent / size * 100)))
+            yield chunk
+    if checkpoint:
+        checkpoint(None)  # Durable intent must precede any media bytes.
     try:
         with path.open("rb") as source:
-            result = http.put(upload_url, content=source,
+            result = http.put(upload_url, content=chunks(source),
                 headers={**_bearer(token), "Content-Type": "video/mp4",
-                         "Content-Length": str(path.stat().st_size)})
-        payload = _json(result)
+                         "Content-Length": str(size)})
+        if result.status_code == 308:
+            raise PublicationUncertain("YouTube получил только часть файла. Не создавайте новую загрузку автоматически.")
+        if result.status_code >= 500:
+            raise httpx.TransportError("YouTube upload acknowledgement unavailable")
+        payload = require_success(result)
     except (httpx.HTTPError, OSError) as exc:
-        raise PublicationUncertain("YouTube upload status is uncertain; check the channel before retrying") from exc
+        # Query only the SAME session. Never repeat videos.insert after uncertain delivery.
+        try:
+            recovered = http.put(upload_url, content=b"", headers={**_bearer(token),
+                "Content-Length": "0", "Content-Range": f"bytes */{size}"})
+            if recovered.status_code not in (200, 201):
+                raise PublicationUncertain("YouTube upload status is uncertain; check the channel before retrying")
+            payload = require_success(recovered)
+        except Exception:
+            raise PublicationUncertain("YouTube upload status is uncertain; check the channel before retrying") from None
     video_id = str(payload.get("id") or "")
     if not video_id:
         raise PublicationUncertain("YouTube did not return a video ID; check the channel before retrying")
-    return PublicationResult(video_id, "published", f"https://www.youtube.com/watch?v={video_id}")
+    if checkpoint:
+        try:
+            checkpoint(video_id)
+        except Exception:
+            raise PublicationUncertain("YouTube принял видео; локальное подтверждение не записано. Проверьте статус, не отправляйте повторно.", video_id) from None
+    if progress:
+        progress(100)
+    return PublicationResult(video_id, "pending", f"https://www.youtube.com/watch?v={video_id}",
+                             {"youtube_upload_status": "uploaded", "youtube_privacy_requested": privacy})
 
 
 def _chunk_layout(size: int) -> tuple[int, int]:
@@ -209,7 +248,7 @@ def _instagram(path: Path, account_id: int, title: str, description: str,
 
 def publish_direct(account_id: int, video_path: str | Path, title: str,
                    description: str, options: dict[str, Any] | None = None,
-                   *, client: httpx.Client | None = None) -> PublicationResult:
+                   *, client: httpx.Client | None = None, progress=None, checkpoint=None) -> PublicationResult:
     path = Path(video_path)
     if not path.is_file() or path.suffix.lower() != ".mp4":
         raise PublishingError("A rendered MP4 file is required")
@@ -220,7 +259,7 @@ def publish_direct(account_id: int, video_path: str | Path, title: str,
         provider = account.provider
     def publish(http: httpx.Client) -> PublicationResult:
         if provider == "youtube":
-            return _youtube(path, account_id, title, description, options or {}, http)
+            return _youtube(path, account_id, title, description, options or {}, http, progress, checkpoint)
         if provider == "tiktok":
             return _tiktok(path, account_id, title, description, options or {}, http)
         if provider == "instagram":
@@ -236,8 +275,29 @@ def check_direct_status(account_id: int, provider: str, external_id: str,
                         *, client: httpx.Client | None = None) -> PublicationResult:
     def check(http: httpx.Client) -> PublicationResult:
         if provider == "youtube":
-            return PublicationResult(external_id, "published",
-                                     f"https://www.youtube.com/watch?v={external_id}")
+            token = get_valid_access_token(account_id, client=http)
+            payload = require_success(http.get("https://www.googleapis.com/youtube/v3/videos",
+                params={"id": external_id, "part": "status,processingDetails,snippet"}, headers=_bearer(token)))
+            items = payload.get("items") or []
+            if not items:
+                return PublicationResult(external_id, "unknown", payload={"youtube_status_message": "Видео удалено или недоступно этому аккаунту. Повторная загрузка не выполнялась."})
+            item = items[0]
+            with SessionLocal() as session:
+                account = session.get(ConnectedAccount, account_id)
+                owner = account.external_id if account else None
+            if item.get("snippet", {}).get("channelId") != owner:
+                raise PublishingError("YouTube вернул видео другого канала. Проверьте выбранный аккаунт.")
+            status, processing = item.get("status", {}), item.get("processingDetails", {})
+            upload, processed = status.get("uploadStatus"), processing.get("processingStatus")
+            failed = upload in {"failed", "rejected", "deleted"} or processed == "failed"
+            ready = upload == "processed" and processed in {None, "succeeded", "terminated"}
+            details = {"youtube_upload_status": upload, "youtube_processing_status": processed,
+                       "youtube_privacy_actual": status.get("privacyStatus"), "youtube_channel_id": owner,
+                       "youtube_verified_at": datetime.now(timezone.utc).isoformat()}
+            if failed:
+                details["youtube_status_message"] = "YouTube не принял или удалил ролик: " + str(status.get("rejectionReason") or status.get("failureReason") or processing.get("processingFailureReason") or upload)
+            return PublicationResult(external_id, "error" if failed else "published" if ready else "pending",
+                                     f"https://www.youtube.com/watch?v={external_id}", details)
         if provider == "tiktok":
             token = get_social_access_token(account_id, client=http)
             data = _tiktok_json(http.post(f"{TIKTOK_BASE}/status/fetch/",

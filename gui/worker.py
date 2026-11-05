@@ -202,6 +202,7 @@ class PreviewRenderWorker(QThread):
 class PublishWorker(QThread):
     succeeded = pyqtSignal(int)
     error = pyqtSignal(str)
+    progress = pyqtSignal(int)
 
     def __init__(self, post_id: int, parent=None):
         super().__init__(parent)
@@ -209,7 +210,7 @@ class PublishWorker(QThread):
 
     def run(self) -> None:
         try:
-            publish_video(self.post_id)
+            publish_video(self.post_id, self.progress.emit)
             self.succeeded.emit(self.post_id)
         except Exception as exc:
             self.error.emit(str(exc))

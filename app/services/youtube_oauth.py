@@ -16,6 +16,7 @@ from app.config import settings
 from app.models import ConnectedAccount, SessionLocal
 from app.services.credentials import CredentialStore, get_credential_store
 from app.services.network import request_with_retry
+from app.services.youtube_errors import require_success, YouTubeAPIError
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +103,7 @@ def exchange_code(
     else:
         with httpx.Client(timeout=30.0) as local_client:
             response = request_with_retry(local_client, "POST", TOKEN_URL, data=data)
-    response.raise_for_status()
-    return response.json()
+    return require_success(response)
 
 
 def refresh_access_token(refresh_token: str, client: httpx.Client | None = None) -> dict[str, Any]:
@@ -118,8 +118,7 @@ def refresh_access_token(refresh_token: str, client: httpx.Client | None = None)
     else:
         with httpx.Client(timeout=30.0) as local_client:
             response = request_with_retry(local_client, "POST", TOKEN_URL, data=data)
-    response.raise_for_status()
-    return response.json()
+    return require_success(response)
 
 
 def exchange_callback(
@@ -215,7 +214,12 @@ def get_valid_access_token(
     bundle = _decode_token_bundle(raw_bundle)
     access_token = str(bundle.get("access_token") or "").strip()
     expires_raw = bundle.get("expires_at")
-    expires_at = datetime.fromisoformat(expires_raw) if expires_raw else None
+    try:
+        expires_at = datetime.fromisoformat(expires_raw) if expires_raw else None
+        if expires_at and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        expires_at = None
     if access_token and expires_at and expires_at > datetime.now(timezone.utc) + timedelta(seconds=60):
         return access_token
 
@@ -223,7 +227,13 @@ def get_valid_access_token(
     if not refresh_token:
         raise ValueError("Stored OAuth credentials have no refresh token")
     logger.info("Refreshing YouTube access token for account %s", account_id)
-    refreshed = refresh_access_token(refresh_token, client)
+    try:
+        refreshed = refresh_access_token(refresh_token, client)
+    except YouTubeAPIError as exc:
+        if exc.reauth:
+            with SessionLocal.begin() as session:
+                session.get(ConnectedAccount, account_id).status = "reauth_required"
+        raise
     save_youtube_account_tokens(account_id, refreshed, credential_store)
     token = str(refreshed.get("access_token") or "").strip()
     if not token:

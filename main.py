@@ -65,6 +65,9 @@ def run() -> int:
     )
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
+    # HTTP client request logs can contain resumable-session URLs and OAuth queries.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     if not root_logger.handlers:
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(log_format)

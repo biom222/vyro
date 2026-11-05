@@ -5,6 +5,8 @@ import logging
 import queue
 import time
 import webbrowser
+import secrets
+import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -16,6 +18,7 @@ from app.config import settings
 from app.services.accounts import set_active_account, upsert_account
 from app.services.credentials import CredentialStore, get_credential_store
 from app.services.network import request_with_retry
+from app.services.youtube_errors import require_success
 from app.services.youtube_oauth import (
     OAuthRequest,
     build_authorization_request,
@@ -51,8 +54,7 @@ def fetch_current_channel(
             response = request_with_retry(
                 local_client, "GET", YOUTUBE_CHANNELS_URL, headers=headers, params=params
             )
-    response.raise_for_status()
-    items = response.json().get("items") or []
+    items = require_success(response).get("items") or []
     if not items:
         raise RuntimeError("Google account has no accessible YouTube channel")
     item = items[0]
@@ -104,8 +106,8 @@ def complete_youtube_oauth(
 def _write_html(handler: BaseHTTPRequestHandler, status: int, title: str, message: str) -> None:
     body = (
         "<!doctype html><html><head><meta charset='utf-8'><title>vyro</title>"
-        "<style>body{font-family:system-ui;background:#15171c;color:#eee;max-width:680px;"
-        "margin:80px auto;padding:24px}h1{color:#7cc7ff}</style></head><body>"
+        "<style>body{font-family:system-ui;background:#1a1a1a;color:#e5e5e5;max-width:680px;"
+        "margin:40px auto;padding:24px}h1{color:#d97706;font-size:20px}</style></head><body>"
         f"<h1>{html.escape(title)}</h1><p>{html.escape(message)}</p>"
         "<p>Это окно можно закрыть.</p></body></html>"
     ).encode("utf-8")
@@ -124,14 +126,15 @@ def run_local_youtube_oauth(
     client: httpx.Client | None = None,
 ) -> YouTubeConnectionResult:
     credential_store = store or get_credential_store()
-    request: OAuthRequest = build_authorization_request(credential_store)
     redirect = urlparse(settings.youtube_redirect_uri)
     if redirect.scheme != "http" or redirect.hostname not in {"127.0.0.1", "localhost"}:
         raise ValueError("YOUTUBE_REDIRECT_URI must use http://127.0.0.1 or http://localhost")
     if not redirect.port:
         raise ValueError("YOUTUBE_REDIRECT_URI must include a local port")
     callback_path = redirect.path or "/"
+    request: OAuthRequest = build_authorization_request(credential_store)
     outcomes: queue.Queue[YouTubeConnectionResult | Exception] = queue.Queue(maxsize=1)
+    accepted = threading.Lock()
 
     class CallbackHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
@@ -140,14 +143,20 @@ def run_local_youtube_oauth(
                 _write_html(self, 404, "Не найдено", "Неизвестный OAuth callback path.")
                 return
             query = parse_qs(parsed.query)
+            state = (query.get("state") or [""])[0]
+            if not secrets.compare_digest(state, request.state):
+                _write_html(self, 400, "Неверный ответ", "Параметр защиты OAuth не совпал. Продолжите исходный вход.")
+                return
+            if not accepted.acquire(blocking=False):
+                _write_html(self, 409, "Ответ уже получен", "Возвращайтесь в vyro.")
+                return
             provider_error = (query.get("error") or [""])[0]
             if provider_error:
-                error = RuntimeError(f"Google OAuth error: {provider_error}")
+                error = RuntimeError("Google отклонил вход. Для приложения в режиме Testing добавьте свой Google-аккаунт в Test users; затем повторите вход.")
                 outcomes.put(error)
                 _write_html(self, 400, "Подключение отменено", str(error))
                 return
             code = (query.get("code") or [""])[0]
-            state = (query.get("state") or [""])[0]
             try:
                 if not code or not state:
                     raise ValueError("OAuth callback has no code or state")
@@ -155,7 +164,7 @@ def run_local_youtube_oauth(
                     code, state, credential_store, client
                 )
             except Exception as exc:
-                logger.exception("YouTube OAuth callback failed")
+                logger.warning("YouTube OAuth callback failed (%s)", type(exc).__name__)
                 outcomes.put(exc)
                 _write_html(self, 400, "Ошибка подключения", str(exc))
             else:
@@ -168,18 +177,22 @@ def run_local_youtube_oauth(
                 )
 
         def log_message(self, format: str, *args: Any) -> None:
-            logger.debug("OAuth callback: " + format, *args)
+            logger.debug("Received local OAuth callback")
 
-    server = ThreadingHTTPServer((redirect.hostname, redirect.port), CallbackHandler)
+    try:
+        server = ThreadingHTTPServer((redirect.hostname, redirect.port), CallbackHandler)
+    except OSError:
+        credential_store.delete(request.state_reference)
+        raise RuntimeError("Локальный порт входа занят. Закройте другой запрос подключения и повторите.") from None
     server.daemon_threads = True
     server.timeout = 0.5
     try:
         logger.info("Waiting for YouTube OAuth callback at %s", settings.youtube_redirect_uri)
         if open_browser:
             if not webbrowser.open(request.url):
-                logger.warning("Could not open a browser automatically: %s", request.url)
+                raise RuntimeError("Не удалось открыть браузер. Проверьте браузер по умолчанию и повторите вход.")
         else:
-            logger.info("Open this authorization URL: %s", request.url)
+            logger.info("OAuth callback waiting; browser launch disabled")
         deadline = time.monotonic() + timeout_seconds
         while outcomes.empty() and time.monotonic() < deadline:
             server.handle_request()
@@ -191,4 +204,5 @@ def run_local_youtube_oauth(
             raise outcome
         return outcome
     finally:
+        credential_store.delete(request.state_reference)
         server.server_close()

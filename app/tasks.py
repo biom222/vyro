@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from sqlalchemy import update
+from sqlalchemy import update, select
 
 from app.config import settings
 from app.media_process import RenderCancelled
@@ -105,6 +105,25 @@ def render_video(
 
 def _claim_post_for_publication(post_id: int) -> None:
     with SessionLocal() as session:
+        if session.bind.dialect.name == "sqlite":
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        post = session.get(Post, post_id)
+        if post and post.platform == "youtube":
+            payload = post.payload_json or {}
+            if post.external_id or payload.get("youtube_upload_attempted"):
+                if post.status not in {"pending", "published"}:
+                    post.status = "unknown"
+                    session.commit()
+                raise ValueError("YouTube уже получал эту операцию. Проверьте статус; повторная загрузка заблокирована.")
+            path = payload.get("media_path")
+            for previous in session.scalars(select(Post).where(Post.account_id == post.account_id, Post.id != post.id, Post.platform == "youtube")):
+                old = previous.payload_json or {}
+                if ((path and old.get("media_path") == path or not path and previous.video_id == post.video_id)
+                        and (previous.status in {"publishing", "pending", "published", "unknown"} or old.get("youtube_upload_attempted"))):
+                    post.status = "error"
+                    post.error_message = f"Duplicate of post {previous.id}; no upload sent"
+                    session.commit()
+                    raise ValueError(f"Для этого экспорта уже есть отправка #{previous.id}. Проверьте её статус вместо повторной загрузки.")
         claimed = session.execute(
             update(Post)
             .where(
@@ -127,7 +146,7 @@ def _claim_post_for_publication(post_id: int) -> None:
         session.commit()
 
 
-def publish_video(post_id: int) -> None:
+def publish_video(post_id: int, progress_callback=None) -> None:
     _claim_post_for_publication(post_id)
     try:
         with SessionLocal() as session:
@@ -151,7 +170,15 @@ def publish_video(post_id: int) -> None:
 
             values = (account.id, media_path, post.title, post.description, payload)
 
-        result = publish_direct(*values)
+        def checkpoint(external_id):
+            with SessionLocal.begin() as session:
+                post = session.get(Post, post_id)
+                post.payload_json = {**(post.payload_json or {}), "youtube_upload_attempted": True}
+                if external_id:
+                    post.external_id = external_id
+                    post.external_url = f"https://www.youtube.com/watch?v={external_id}"
+                    post.status = "pending"
+        result = publish_direct(*values, progress=progress_callback, checkpoint=checkpoint) if account.provider == "youtube" else publish_direct(*values)
         with SessionLocal() as session:
             post = session.get(Post, post_id)
             if post:
@@ -170,7 +197,7 @@ def publish_video(post_id: int) -> None:
             post = session.get(Post, post_id)
             if post:
                 post.status = "unknown"
-                post.external_id = exc.external_id or None
+                post.external_id = exc.external_id or post.external_id
                 post.error_message = str(exc)[:2000]
                 session.commit()
         raise
@@ -179,7 +206,7 @@ def publish_video(post_id: int) -> None:
         with SessionLocal() as session:
             post = session.get(Post, post_id)
             if post:
-                post.status = "error"
+                post.status = "unknown" if post.platform == "youtube" and (post.external_id or (post.payload_json or {}).get("youtube_upload_attempted")) else "error"
                 post.error_message = str(exc)[:2000]
                 post.retry_count = (post.retry_count or 0) + 1
                 post.last_attempt_at = datetime.now(timezone.utc)
@@ -191,7 +218,7 @@ def refresh_publication(post_id: int) -> str:
     """Poll a pending provider publication without creating a second upload."""
     with SessionLocal() as session:
         post = session.get(Post, post_id)
-        if post is None or post.status not in {"pending", "unknown"}:
+        if post is None or post.status not in {"pending", "unknown", "publishing", "published"}:
             raise ValueError("Post is not waiting for a provider result")
         if not post.account_id or not post.external_id:
             raise ValueError("Provider did not return an ID; check the account manually")
@@ -203,9 +230,10 @@ def refresh_publication(post_id: int) -> str:
             post.status = result.status
             post.external_id = result.external_id
             post.external_url = result.external_url
-            post.error_message = None
+            post.payload_json = {**(post.payload_json or {}), **(result.payload or {})}
+            post.error_message = (result.payload or {}).get("youtube_status_message")
             if result.status == "published":
-                post.published_at = datetime.now(timezone.utc)
+                post.published_at = post.published_at or datetime.now(timezone.utc)
             session.commit()
     return result.status
 
