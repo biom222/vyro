@@ -1,6 +1,20 @@
 # Product status and Phase 0 baseline
 
-## Current update: Phase 4
+## Current update: Phase 5
+
+YouTube is LIVE VERIFIED for one user-approved private six-second synthetic upload
+on 2026-11-05. Browser OAuth, channel discovery/selection and OS-keyring persistence
+succeeded after the user added the account to Google OAuth Test users. The existing
+publication service recorded the provider ID, then a new process queried videos.list:
+uploaded/processing -> processed/succeeded, actual privacy private, matching owner.
+Another invocation confirmed that repeating the saved operation makes no upload call.
+71 automated tests pass, including lost-acknowledgement recovery, wrong-state/denied
+callbacks, revoked refresh, quota errors, owner checks and duplicate guards.
+See [PHASE5_REPORT.md](PHASE5_REPORT.md) for exact scope. This is service-level live
+evidence, not native GUI-upload acceptance, live analytics or a production release.
+The historical Phase 0 inventory below remains a baseline, not current feature status.
+
+## Previous update: Phase 4
 
 Phase 4 adds background project/media inventory in searchable QTableViews, created/
 updated/opened dates, duration/export/missing-source states, rename, recent/last-opened

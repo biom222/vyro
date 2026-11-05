@@ -6,8 +6,9 @@ architecture. Current evidence and known findings: [PRODUCT_STATUS.md](PRODUCT_S
 
 Phase 0 audit and Phases 1-2 implementation have been executed; see their status/report
 documents. Phase 3 is implemented with automated verification; its native manual gate
-remains open. Phase 4 is implemented and locally verified; see its report. Phase 5 and
-later require separate commands. Do not combine the roadmap
+remains open. Phase 4 is implemented and locally verified; see its report. Phase 5
+has live YouTube evidence; see PHASE5_REPORT.md for scope and remaining limitations.
+Phase 6 and later require separate commands. Do not combine the roadmap
 into one implementation change.
 
 ## Rules shared by every phase
@@ -123,6 +124,10 @@ Gate: real multi-project lifecycle, duplication/deletion ownership and missing-m
 scenarios pass without damaging shared/original assets.
 
 ## Phase 5 - Live YouTube E2E
+
+Status: LIVE VERIFIED for the approved private test upload through the existing
+services on Windows; see [PHASE5_REPORT.md](PHASE5_REPORT.md). Native GUI upload and
+clean-machine release acceptance remain unverified.
 
 - Reuse existing state/PKCE/local callback/keyring/account/upload/analytics services.
 - Test browser authorization, channel discovery and active selection, export and

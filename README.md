@@ -3,8 +3,10 @@
 Cross-platform PyQt6 desktop application for trimming, positioning a vertical crop, captioning, exporting, and publishing vertical videos. All media processing runs locally through FFmpeg in `QThread`; no FastAPI server, Redis, or RQ worker is required.
 
 Current stage: technical desktop alpha, not a production release. The local FFmpeg
-editor has real smoke verification; external publishing/AI/analytics adapters have
-contract tests but no recorded live end-to-end verification. Start with the audited
+editor has real smoke verification; YouTube has a recorded live private-upload check
+including remote processing/privacy and restart verification (see
+[Phase 5 report](docs/PHASE5_REPORT.md)). TikTok, Instagram, AI and analytics still
+have contract tests rather than recorded live end-to-end verification. Start with the audited
 [product status](docs/PRODUCT_STATUS.md) and [production roadmap](docs/PRODUCTION_ROADMAP.md)
 before treating a feature list as a release guarantee.
 

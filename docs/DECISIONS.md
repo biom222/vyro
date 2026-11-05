@@ -95,3 +95,18 @@
   cancellation, protect current sources/exports, pinned publication media and retained
   previous exports. Remember destination only on success; defer file-manager behavior
   verification on every OS and broad cache/retention management to later phases.
+
+## 2026-11-05 - Phase 5 YouTube delivery and verification
+
+- Reuse existing OAuth/keyring/account services. Validate state before denial as well
+  as success, accept one callback and omit callback query strings from logs.
+- Persist intent before media bytes and checkpoint the provider ID before final task
+  completion. An uncertain upload may query only the same session; never blindly insert
+  again. Preserve any existing checkpointed ID when recording uncertain status.
+- Upload acknowledgement is pending. Query videos.list for matching ownership, actual
+  processing and visibility. Published means processing complete, not public access.
+- Restore YouTube operations from SQLite for explicit status checks after restart,
+  without automatic upload. Block history/scheduler resend of known/uncertain operations
+  and matching pinned exports. Broader operation state machine remains Phase 8.
+- Keep live evidence separate from mock contracts. One neutral private test was
+  explicitly approved and verified; no private account IDs/tokens are committed.

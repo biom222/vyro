@@ -283,7 +283,8 @@ class DesktopTests(unittest.TestCase):
             "remote-id", "published", "https://www.youtube.com/watch?v=remote-id"
         )) as direct:
             publish_video(post_id)
-        direct.assert_called_once_with(account_id, str(output), "Demo", "Caption", {})
+        from unittest.mock import ANY
+        direct.assert_called_once_with(account_id, str(output), "Demo", "Caption", {}, progress=None, checkpoint=ANY)
         with SessionLocal() as session:
             post = session.get(Post, post_id)
             self.assertEqual(post.status, "published")
@@ -401,9 +402,148 @@ class DesktopTests(unittest.TestCase):
             result = publish_direct(account_id, path, "Title", "Description",
                                     {"youtube_privacy": "unlisted"}, client=client)
         self.assertEqual(result.external_id, "youtube-video")
+        self.assertEqual(result.status, "pending")
         self.assertEqual(observed[0].url.host, "www.googleapis.com")
         self.assertEqual(json.loads(observed[0].content)["status"]["privacyStatus"], "unlisted")
         self.assertEqual(observed[1].content, b"small-video")
+
+    def test_youtube_checks_remote_processing_privacy_and_owner(self):
+        account_id = upsert_account("youtube", "status-owner", "Status owner")
+        for upload, processing, expected in [
+            ("uploaded", "processing", "pending"),
+            ("processed", "succeeded", "published"),
+            ("rejected", "failed", "error"),
+        ]:
+            with self.subTest(upload=upload):
+                def handler(request):
+                    self.assertEqual(request.method, "GET")
+                    self.assertEqual(request.url.params["id"], "remote-test")
+                    return httpx.Response(200, json={"items": [{
+                        "snippet": {"channelId": "status-owner"},
+                        "status": {"uploadStatus": upload, "privacyStatus": "private"},
+                        "processingDetails": {"processingStatus": processing},
+                    }]})
+                with httpx.Client(transport=httpx.MockTransport(handler)) as client, patch(
+                    "app.services.direct_publishing.get_valid_access_token", return_value="test-token"
+                ):
+                    result = check_direct_status(account_id, "youtube", "remote-test", client=client)
+                self.assertEqual(result.status, expected)
+                self.assertEqual(result.payload["youtube_privacy_actual"], "private")
+        with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(
+            200, json={"items": [{"snippet": {"channelId": "someone-else"}}]}
+        ))) as client, patch(
+            "app.services.direct_publishing.get_valid_access_token", return_value="test-token"
+        ):
+            with self.assertRaisesRegex(RuntimeError, "YouTube"):
+                check_direct_status(account_id, "youtube", "remote-test", client=client)
+
+    def test_youtube_lost_acknowledgement_queries_same_session(self):
+        account_id = upsert_account("youtube", "recovery-owner", "Recovery owner")
+        with SessionLocal() as session:
+            session.get(ConnectedAccount, account_id).credential_ref = "test:recovery"
+            session.commit()
+        path = Path(TEST_ROOT.name, "recovery.mp4")
+        path.write_bytes(b"test-media")
+        calls, checkpoints, progress = [], [], []
+        def handler(request):
+            calls.append(request)
+            if request.method == "POST":
+                return httpx.Response(200, headers={"Location": "https://www.googleapis.com/upload/session/recovery"})
+            self.assertEqual(checkpoints[0], None)
+            if request.headers.get("Content-Range"):
+                self.assertEqual(request.headers["Content-Range"], "bytes */10")
+                return httpx.Response(200, json={"id": "recovered-id"})
+            raise httpx.ReadError("Lost response", request=request)
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client, patch(
+            "app.services.direct_publishing.get_valid_access_token", return_value="test-token"
+        ):
+            result = publish_direct(account_id, path, "Test", "", client=client,
+                                    checkpoint=checkpoints.append, progress=progress.append)
+        self.assertEqual(result.status, "pending")
+        self.assertEqual(checkpoints, [None, "recovered-id"])
+        self.assertEqual(sum(r.method == "POST" for r in calls), 1)
+        self.assertEqual(calls[1].url, calls[2].url)
+        self.assertEqual(progress[-1], 100)
+        self.assertEqual(progress, sorted(progress))
+
+    def test_youtube_missing_remote_video_is_unknown(self):
+        account_id = upsert_account("youtube", "missing-remote", "Missing remote")
+        with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(
+            200, json={"items": []}
+        ))) as client, patch("app.services.direct_publishing.get_valid_access_token", return_value="test-token"):
+            result = check_direct_status(account_id, "youtube", "missing", client=client)
+        self.assertEqual(result.status, "unknown")
+
+    def test_youtube_duplicate_post_and_operation_are_blocked_before_network(self):
+        account_id = upsert_account("youtube", "duplicate-owner", "Duplicate owner")
+        video_id = self.create_video("duplicate-upload.mp4")
+        with SessionLocal.begin() as session:
+            previous = Post(video_id=video_id, account_id=account_id, platform="youtube",
+                            status="unknown", payload_json={"youtube_upload_attempted": True})
+            new = Post(video_id=video_id, account_id=account_id, platform="youtube", status="queued")
+            session.add_all([previous, new])
+            session.flush()
+            ids = previous.id, new.id
+        with patch("app.tasks.publish_direct") as upload:
+            for post_id in ids:
+                with self.assertRaises(ValueError):
+                    publish_video(post_id)
+            upload.assert_not_called()
+        with SessionLocal() as session:
+            self.assertEqual(session.get(Post, ids[0]).status, "unknown")
+            self.assertEqual(session.get(Post, ids[1]).status, "error")
+
+    def test_youtube_revoked_refresh_preserves_credentials_and_requires_reconnect(self):
+        from app.services.youtube_errors import YouTubeAPIError, require_success
+        account_id = upsert_account("youtube", "revoked-owner", "Revoked owner")
+        store = MemoryCredentialStore()
+        save_youtube_account_tokens(account_id, {"refresh_token": "test-refresh", "access_token": "old"}, store)
+        with SessionLocal() as session:
+            reference = session.get(ConnectedAccount, account_id).credential_ref
+        bundle = json.loads(store.get(reference))
+        bundle["expires_at"] = "2020-01-01T00:00:00"
+        store.set(reference, json.dumps(bundle))
+        with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(
+            400, json={"error": "invalid_grant", "error_description": "DO-NOT-LOG-SECRET"}
+        ))) as client:
+            with self.assertRaises(YouTubeAPIError) as error:
+                get_valid_access_token(account_id, store, client)
+        self.assertNotIn("DO-NOT-LOG-SECRET", str(error.exception))
+        self.assertTrue(store.get(reference))
+        with SessionLocal() as session:
+            self.assertEqual(session.get(ConnectedAccount, account_id).status, "reauth_required")
+        with self.assertRaises(YouTubeAPIError) as quota:
+            require_success(httpx.Response(403, json={"error": {"errors": [{"reason": "quotaExceeded"}]}}))
+        self.assertFalse(quota.exception.reauth)
+
+    def test_youtube_callback_rejects_wrong_state_and_cleans_denied_request(self):
+        import socket
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        from app.services.youtube_oauth_server import run_local_youtube_oauth
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        store, opened = MemoryCredentialStore(), threading.Event()
+        with patch.object(settings, "youtube_client_id", "unit-client"), patch.object(
+            settings, "youtube_redirect_uri", f"http://127.0.0.1:{port}/callback"
+        ):
+            request = build_authorization_request(store)
+            with patch("app.services.youtube_oauth_server.build_authorization_request", return_value=request), patch(
+                "app.services.youtube_oauth_server.webbrowser.open", side_effect=lambda url: opened.set() or True
+            ), patch("app.services.youtube_oauth_server.complete_youtube_oauth") as exchange, ThreadPoolExecutor(1) as pool:
+                future = pool.submit(run_local_youtube_oauth, store=store, timeout_seconds=5)
+                self.assertTrue(opened.wait(2))
+                with httpx.Client(trust_env=False) as client:
+                    bad = client.get(f"http://127.0.0.1:{port}/callback", params={"state": "wrong", "error": "access_denied"})
+                    self.assertEqual(bad.status_code, 400)
+                    self.assertFalse(future.done())
+                    denied = client.get(f"http://127.0.0.1:{port}/callback", params={"state": request.state, "error": "access_denied"})
+                    self.assertEqual(denied.status_code, 400)
+                with self.assertRaisesRegex(RuntimeError, "Test users"):
+                    future.result(timeout=3)
+                exchange.assert_not_called()
+            self.assertIsNone(store.get(request.state_reference))
 
     def test_direct_tiktok_upload_and_status(self):
         account_id = upsert_account("tiktok", "api-tiktok", "API TikTok")

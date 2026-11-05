@@ -21,8 +21,8 @@ Project/media lifecycle and ownership evidence: [PHASE4_REPORT.md](PHASE4_REPORT
 | Transcription/subtitles | `transcription.py`, `subtitles.py`, `scenes.py` | Mock/real faster-whisper adapter, timed segments, SRT/VTT, subtitle burn, technical shot boundaries; real speech inference not reverified in audit. |
 | AI/ideas | `ai.py`, `content_pipeline.py` | Deterministic mock, real structured-output OpenAI adapter, persisted suggestions; real AI quality unverified. |
 | Trends/rights | `trends.py`, `copyright.py` | YouTube metadata/search/snapshots/score and heuristic risk labels; no semantic watching or determination of reuse rights. |
-| Accounts/secrets | `accounts.py`, `credentials.py`, YouTube/social OAuth services | PKCE/state, account records and keyring references; mocked contracts pass, live completion and distributed-secret design unverified. |
-| Direct publishing | `direct_publishing.py`, tasks and publish/account GUI | YouTube/TikTok/Instagram adapters exist; contracts do not establish live publication/final provider processing status. |
+| Accounts/secrets | `accounts.py`, `credentials.py`, YouTube/social OAuth services | YouTube PKCE/state, channel selection and OS-keyring persistence verified live; other providers and distributed-secret design unverified. |
+| Direct publishing | `direct_publishing.py`, tasks and publish/account GUI | YouTube private upload/final processing/privacy verified live; TikTok/Instagram remain contract-tested only. |
 | Scheduler | `scheduler.py`, `scheduler_runner.py`, calendar | Persistent scheduled records and claims; uncertain-state retry, restart recovery and shutdown have known gaps. |
 | Analytics | `analytics.py`, `dashboard.py`, dashboard widget | YouTube normalization/period upsert and token refresh tested with fixtures; real account sync and metric provenance UI incomplete. |
 | Engineering/distribution | CLI doctor, rotating log, `build_desktop.py` | Local onedir executable exists; installer, signing, updater and clean-machine release checks are absent. |
@@ -102,14 +102,22 @@ published/error/unknown; the target production state machine is not implemented 
 
 Direct adapters upload through official APIs. OAuth credentials are referenced through
 keyring, with a memory store available for tests. Taisly is not imported by the desktop
-publication path. YouTube currently regards a successful upload response as published;
-its status helper returns that assumption without querying remote processing. Pending
-polling is widget-local and does not recover after restart. Scheduler retry can requeue
-an unknown remote result, so blanket duplicate-protection claims are not justified.
+publication path. YouTube upload acknowledgement is pending, not published. Its
+videos.list check verifies ownership, upload/processing state and actual visibility.
+Media progress runs through the existing QThread signals. A durable attempt flag
+precedes media bytes; an acknowledged external ID is checkpointed before task completion.
+An uncertain response queries only the same resumable session, never a new insert.
+Known/uncertain YouTube operations and matching pinned exports are blocked from
+automatic resend, including the scheduler/history paths. This is conservative local
+protection, not remote exactly-once delivery or content-hash deduplication.
+The publication GUI rebuilds its recent YouTube operation list from SQLite at startup;
+status verification is explicit, then pending results are polled. No upload is resumed
+automatically. Operations without a provider ID require manual channel inspection.
 
-No provider is marked LIVE VERIFIED. The last observed Google attempt was blocked by
-Testing/test-user authorization; TikTok/Instagram live credentials are not configured
-in the audited local development setup. No new live provider operation was performed.
+YouTube is LIVE VERIFIED for an approved six-second private synthetic upload, with
+processed/succeeded, private visibility, matching channel, status reread in a new
+process and a blocked repeat attempt. See PHASE5_REPORT.md. TikTok/Instagram and live
+analytics remain unverified. No account identifiers or credentials are in committed evidence.
 
 ## Paths and retained compatibility
 
